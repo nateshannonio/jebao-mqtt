@@ -2,9 +2,6 @@
 
 A Python service that connects Jebao DMP series aquarium wavemaker pumps to Home Assistant via MQTT.
 
-NOTE: This is only a Proof of Concept at this point in time. 
-This is a project to learn about BLE integrations and reverse engineering.
-
 ## Features
 
 - **Multiple pump support** - Connect up to 5-7 pumps from one Raspberry Pi
@@ -20,13 +17,133 @@ This is a project to learn about BLE integrations and reverse engineering.
 - MQTT Broker (Mosquitto recommended)
 - Home Assistant with MQTT integration
 
+## Local Development (Mac/Linux)
+
+For testing on your development machine before deploying to Pi.
+
+### 1. Setup Python Environment
+
+```bash
+cd jebao-mqtt
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 2. Run MQTT Broker Locally
+
+**Option A: Docker (easiest)**
+```bash
+# Start Mosquitto MQTT broker
+docker run -d --name mosquitto \
+  -p 1883:1883 \
+  eclipse-mosquitto:2 \
+  mosquitto -c /mosquitto-no-auth.conf
+
+# Verify it's running
+docker logs mosquitto
+```
+
+**Option B: Homebrew (macOS)**
+```bash
+brew install mosquitto
+brew services start mosquitto
+
+# Or run in foreground
+mosquitto -v
+```
+
+**Option C: apt (Linux)**
+```bash
+sudo apt install mosquitto mosquitto-clients
+sudo systemctl start mosquitto
+```
+
+### 3. Configure for Local Testing
+
+```bash
+cp config.yaml.example config.yaml
+```
+
+Edit `config.yaml`:
+```yaml
+mqtt:
+  host: localhost      # Local broker
+  port: 1883
+  username: null       # No auth for local testing
+  password: null
+
+pumps:
+  - name: "Test Pump"
+    mac: "XX:XX:XX:XX:XX:XX"  # Your pump's MAC
+```
+
+### 4. Find Your Pump
+
+```bash
+python3 scan.py
+```
+
+### 5. Run the Bridge
+
+```bash
+python3 jebao_mqtt_bridge.py --config config.yaml --debug
+```
+
+### 6. Test MQTT Messages
+
+In another terminal, subscribe to see messages:
+
+```bash
+# Docker
+docker exec mosquitto mosquitto_sub -t 'jebao/#' -v
+
+# Or if mosquitto-clients installed locally
+mosquitto_sub -h localhost -t 'jebao/#' -v
+```
+
+Send test commands:
+
+```bash
+# Turn pump on
+mosquitto_pub -h localhost -t 'jebao/test_pump/power/set' -m 'ON'
+
+# Set flow to 50%
+mosquitto_pub -h localhost -t 'jebao/test_pump/flow/set' -m '50'
+
+# Enable feed mode
+mosquitto_pub -h localhost -t 'jebao/test_pump/feed/set' -m 'ON'
+```
+
+### 7. Cleanup
+
+```bash
+# Stop Docker MQTT broker
+docker stop mosquitto && docker rm mosquitto
+
+# Or Homebrew
+brew services stop mosquitto
+
+# Deactivate venv
+deactivate
+```
+
+### Note for Mac Users
+
+Docker on Mac **cannot access Bluetooth**, so you must run the bridge natively with Python (not in Docker) to connect to real pumps. Docker is only useful for:
+- Running the MQTT broker
+- Testing the Docker image builds correctly
+- CI/CD pipelines
+
+---
+
 ## Quick Start
 
 ### Option 1: Docker (Recommended)
 
 ```bash
 # Clone repo
-git clone https://github.com/nateshannonio/jebao-mqtt.git ~/jebao-mqtt
+git clone https://github.com/YOUR_USERNAME/jebao-mqtt.git ~/jebao-mqtt
 cd ~/jebao-mqtt
 
 # Run setup script
@@ -48,7 +165,7 @@ docker compose logs -f
 
 ```bash
 # Clone repo
-git clone https://github.com/nateshannonio/jebao-mqtt.git ~/jebao-mqtt
+git clone https://github.com/YOUR_USERNAME/jebao-mqtt.git ~/jebao-mqtt
 cd ~/jebao-mqtt
 
 # Run setup script
@@ -115,7 +232,7 @@ Once you push to GitHub, images are built automatically for:
 
 ```yaml
 # In docker-compose.yml, replace 'build: .' with:
-image: ghcr.io/nateshannonio/jebao-mqtt:latest
+image: ghcr.io/YOUR_USERNAME/jebao-mqtt:latest
 ```
 
 ### Docker Commands
@@ -401,7 +518,7 @@ jebao-mqtt/
 
 ```bash
 # Clone your GitHub repo
-git clone https://github.com/nateshannonio/jebao-mqtt.git ~/jebao-mqtt
+git clone https://github.com/YOUR_USERNAME/jebao-mqtt.git ~/jebao-mqtt
 cd ~/jebao-mqtt
 
 # Enable pre-commit security hook
