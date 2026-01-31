@@ -1,0 +1,38 @@
+# Git
+.git
+.gitignore
+.githooks
+
+# GitHub
+.github
+
+# Docs
+docs/
+README.md
+LICENSE
+
+# Config with secrets
+config.yaml
+.env
+
+# Scripts not needed in container
+scripts/setup.sh
+scripts/setup-docker.sh
+scripts/setup-maintenance.sh
+scripts/update.sh
+scripts/alert.sh
+scripts/backup.sh
+scripts/system-monitor.sh
+scripts/jebao-mqtt-update.service
+scripts/jebao-mqtt-update.timer
+
+# Docker
+docker-compose*.yml
+Dockerfile
+
+# Development
+*.pyc
+__pycache__
+.vscode
+.idea
+*.swp

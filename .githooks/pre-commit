@@ -1,0 +1,86 @@
+#!/bin/bash
+# .githooks/pre-commit
+#
+# Pre-commit hook to prevent accidental secret commits
+# Install with: git config core.hooksPath .githooks
+
+RED='\033[0;31m'
+NC='\033[0m'
+
+echo "Running pre-commit security check..."
+
+# Patterns that indicate secrets
+SECRET_PATTERNS=(
+    'password\s*[:=]\s*["\x27][^"\x27]+'    # password: "value" or password = 'value'
+    'token\s*[:=]\s*["\x27][^"\x27]+'
+    'api_key\s*[:=]\s*["\x27][^"\x27]+'
+    'secret\s*[:=]\s*["\x27][^"\x27]+'
+    'NTFY_TOPIC=\S+'                         # Filled env vars
+    'PUSHOVER_TOKEN=\S+'
+    'TELEGRAM_TOKEN=\S+'
+    'HA_WEBHOOK=\S+'
+    'mqtt.*password.*\S'
+    'mac:\s*"[0-9A-Fa-f:]{17}"'             # Real MAC addresses
+)
+
+# Files to check (staged files only)
+FILES=$(git diff --cached --name-only --diff-filter=ACM)
+
+FOUND_SECRETS=0
+
+for file in $FILES; do
+    # Skip example files and this hook
+    if [[ "$file" == *.example ]] || [[ "$file" == *pre-commit* ]]; then
+        continue
+    fi
+    
+    # Skip binary files
+    if file "$file" | grep -q "binary"; then
+        continue
+    fi
+    
+    for pattern in "${SECRET_PATTERNS[@]}"; do
+        if grep -qiE "$pattern" "$file" 2>/dev/null; then
+            echo -e "${RED}⚠️  Potential secret found in: $file${NC}"
+            echo "   Pattern: $pattern"
+            grep -niE "$pattern" "$file" | head -3
+            FOUND_SECRETS=1
+        fi
+    done
+done
+
+# Check for specific sensitive files
+SENSITIVE_FILES=(
+    "config.yaml"
+    ".env"
+    "id_rsa"
+    "id_ed25519"
+    "*.pem"
+    "*.key"
+)
+
+for pattern in "${SENSITIVE_FILES[@]}"; do
+    for file in $FILES; do
+        if [[ "$file" == $pattern ]]; then
+            echo -e "${RED}⚠️  Sensitive file staged: $file${NC}"
+            FOUND_SECRETS=1
+        fi
+    done
+done
+
+if [ $FOUND_SECRETS -eq 1 ]; then
+    echo ""
+    echo -e "${RED}❌ Commit blocked - potential secrets detected!${NC}"
+    echo ""
+    echo "If these are intentional (e.g., example values), you can bypass with:"
+    echo "  git commit --no-verify"
+    echo ""
+    echo "Otherwise, please:"
+    echo "  1. Remove secrets from staged files"
+    echo "  2. Use config.yaml.example and .env.example for templates"
+    echo "  3. Add real config files to .gitignore"
+    exit 1
+fi
+
+echo "✅ No secrets detected"
+exit 0
