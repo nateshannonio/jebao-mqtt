@@ -23,7 +23,7 @@ A Python service that connects Jebao DMP series aquarium wavemaker pumps to Home
 
 ```bash
 # Clone repo
-git clone https://github.com/YOUR_USERNAME/jebao-mqtt.git ~/jebao-mqtt
+git clone https://github.com/nateshannonio/jebao-mqtt.git ~/jebao-mqtt
 cd ~/jebao-mqtt
 
 # Run setup script
@@ -45,7 +45,7 @@ docker compose logs -f
 
 ```bash
 # Clone repo
-git clone https://github.com/YOUR_USERNAME/jebao-mqtt.git ~/jebao-mqtt
+git clone https://github.com/nateshannonio/jebao-mqtt.git ~/jebao-mqtt
 cd ~/jebao-mqtt
 
 # Run setup script
@@ -112,7 +112,7 @@ Once you push to GitHub, images are built automatically for:
 
 ```yaml
 # In docker-compose.yml, replace 'build: .' with:
-image: ghcr.io/YOUR_USERNAME/jebao-mqtt:latest
+image: ghcr.io/nateshannonio/jebao-mqtt:latest
 ```
 
 ### Docker Commands
@@ -398,7 +398,7 @@ jebao-mqtt/
 
 ```bash
 # Clone your GitHub repo
-git clone https://github.com/YOUR_USERNAME/jebao-mqtt.git ~/jebao-mqtt
+git clone https://github.com/nateshannonio/jebao-mqtt.git ~/jebao-mqtt
 cd ~/jebao-mqtt
 
 # Enable pre-commit security hook

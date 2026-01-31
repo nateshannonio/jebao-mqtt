@@ -14,7 +14,7 @@ services:
   jebao-mqtt:
     build: .
     # Or use pre-built image:
-    # image: ghcr.io/YOUR_USERNAME/jebao-mqtt-bridge:latest
+    # image: ghcr.io/nateshannonio/jebao-mqtt-bridge:latest
     container_name: jebao-mqtt-bridge
     restart: unless-stopped
     
