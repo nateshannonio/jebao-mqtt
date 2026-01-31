@@ -51,13 +51,13 @@ ATTR_MODE = (0x00, 0x10, 0x02)
 ATTR_FLOW = (0x00, 0x80, 0x00)
 ATTR_FREQUENCY = (0x01, 0x00, 0x00)
 
-# Mode mappings
+# Mode mappings (BLE value -> Display name)
 MODES = {
-    0: "Classic",
-    1: "Else", 
-    2: "Pulse",
-    4: "Random",
-    6: "Nutrient"
+    0: "Classic Wave",   # Mode 1 on controller
+    1: "Cross-flow",     # Mode 5 on controller
+    2: "Sine Wave",      # Mode 2 on controller
+    4: "Random",         # Mode 4 on controller
+    6: "Constant",       # Mode 3 on controller
 }
 MODE_VALUES = {v: k for k, v in MODES.items()}
 
@@ -78,6 +78,8 @@ class PumpState:
     power_on_time: float = 0.0  # Timestamp when power turned on
     runtime_today: float = 0.0  # Hours running today
     last_runtime_reset: str = ""  # Date of last reset (YYYY-MM-DD)
+    # Track if we've received actual state from pump
+    state_initialized: bool = False
     
 
 @dataclass 
@@ -211,6 +213,7 @@ class JebaoPump:
                 logger.info(f"[{self.config.name}] Frequency: {value}s")
         
         if changed:
+            self.state.state_initialized = True
             self.state_callback(self)
     
     async def _send_login(self):
@@ -350,6 +353,7 @@ class MQTTBridge:
         self.pumps: dict[str, JebaoPump] = {}
         self.mqtt_client: Optional[mqtt.Client] = None
         self._running = False
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         
     def _load_config(self, path: str) -> dict:
         """Load configuration from YAML file"""
@@ -408,8 +412,12 @@ class MQTTBridge:
             
         pump = self.pumps[pump_id]
         
-        # Schedule the async command
-        asyncio.create_task(self._handle_command(pump, entity, payload))
+        # Schedule the async command in the main event loop (thread-safe)
+        if self._loop is not None:
+            asyncio.run_coroutine_threadsafe(
+                self._handle_command(pump, entity, payload),
+                self._loop
+            )
     
     async def _handle_command(self, pump: JebaoPump, entity: str, payload: str):
         """Handle a command for a pump"""
@@ -601,6 +609,18 @@ class MQTTBridge:
         prefix = mqtt_config['topic_prefix']
         pump_id = pump.config.id
         
+        # Always publish connected status
+        self.mqtt_client.publish(
+            f"{prefix}/{pump_id}/connected/state",
+            "ON" if pump.state.connected else "OFF",
+            retain=True
+        )
+        
+        # Don't publish other values until we've received actual state from the pump
+        if not pump.state.state_initialized:
+            logger.debug(f"[{pump.config.name}] Waiting for initial state from pump")
+            return
+        
         # Reset runtime daily
         today = date.today().isoformat()
         if pump.state.last_runtime_reset != today:
@@ -638,11 +658,6 @@ class MQTTBridge:
             retain=True
         )
         self.mqtt_client.publish(
-            f"{prefix}/{pump_id}/connected/state",
-            "ON" if pump.state.connected else "OFF",
-            retain=True
-        )
-        self.mqtt_client.publish(
             f"{prefix}/{pump_id}/runtime/state",
             f"{runtime:.2f}",
             retain=True
@@ -655,6 +670,7 @@ class MQTTBridge:
     async def start(self):
         """Start the bridge"""
         self._running = True
+        self._loop = asyncio.get_running_loop()
         
         # Setup MQTT
         mqtt_config = self._get_mqtt_config()
