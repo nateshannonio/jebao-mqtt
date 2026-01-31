@@ -2,6 +2,9 @@
 
 A Python service that connects Jebao DMP series aquarium wavemaker pumps to Home Assistant via MQTT.
 
+NOTE: This is only a Proof of Concept at this point in time. 
+This is a project to learn about BLE integrations and reverse engineering.
+
 ## Features
 
 - **Multiple pump support** - Connect up to 5-7 pumps from one Raspberry Pi
