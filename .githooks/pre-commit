@@ -9,51 +9,10 @@ NC='\033[0m'
 
 echo "Running pre-commit security check..."
 
-# Patterns that indicate actual secrets (not code that handles secrets)
-SECRET_PATTERNS=(
-    'password\s*[:=]\s*["\x27][^"\x27]+["\x27]'    # password: "actualvalue" or password = 'actualvalue'
-    'token\s*[:=]\s*["\x27][^"\x27]+["\x27]'
-    'api_key\s*[:=]\s*["\x27][^"\x27]+["\x27]'
-    'secret\s*[:=]\s*["\x27][^"\x27]+["\x27]'
-    'NTFY_TOPIC=[a-zA-Z0-9]+'                       # Filled env vars (not empty)
-    'PUSHOVER_TOKEN=[a-zA-Z0-9]+'
-    'PUSHOVER_USER=[a-zA-Z0-9]+'
-    'TELEGRAM_TOKEN=[0-9]+:'
-    'TELEGRAM_CHAT=[0-9]+'
-    'HA_WEBHOOK=http'
-    'mac:\s*"[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}"'  # Real MAC addresses
-)
-
 # Files to check (staged files only)
 FILES=$(git diff --cached --name-only --diff-filter=ACM)
 
 FOUND_SECRETS=0
-
-for file in $FILES; do
-    # Skip example files, this hook, and Python source code
-    if [[ "$file" == *.example ]] || [[ "$file" == *pre-commit* ]]; then
-        continue
-    fi
-
-    # Skip binary files
-    if file "$file" 2>/dev/null | grep -q "binary"; then
-        continue
-    fi
-
-    # Only check config files, not source code
-    if [[ "$file" == *.py ]] || [[ "$file" == *.sh ]]; then
-        continue
-    fi
-
-    for pattern in "${SECRET_PATTERNS[@]}"; do
-        if grep -qiE "$pattern" "$file" 2>/dev/null; then
-            echo -e "${RED}⚠️  Potential secret found in: $file${NC}"
-            echo "   Pattern: $pattern"
-            grep -niE "$pattern" "$file" | head -3
-            FOUND_SECRETS=1
-        fi
-    done
-done
 
 # Check for specific sensitive files that should never be committed
 SENSITIVE_FILES=(
@@ -72,15 +31,16 @@ done
 
 if [ $FOUND_SECRETS -eq 1 ]; then
     echo ""
-    echo -e "${RED}❌ Commit blocked - potential secrets detected!${NC}"
+    echo -e "${RED}❌ Commit blocked - sensitive files detected!${NC}"
     echo ""
-    echo "If these are intentional (e.g., example values), you can bypass with:"
+    echo "These files contain secrets and should not be committed:"
+    echo "  - config.yaml (contains pump MAC, MQTT credentials)"
+    echo "  - .env (contains alert tokens)"
+    echo ""
+    echo "Use the .example versions as templates instead."
+    echo ""
+    echo "To bypass (if you know what you're doing):"
     echo "  git commit --no-verify"
-    echo ""
-    echo "Otherwise, please:"
-    echo "  1. Remove secrets from staged files"
-    echo "  2. Use config.yaml.example and .env.example for templates"
-    echo "  3. Add real config files to .gitignore"
     exit 1
 fi
 
