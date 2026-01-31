@@ -1,0 +1,80 @@
+# docker-compose.yml
+#
+# Jebao MQTT Bridge - Docker Compose Configuration
+#
+# Usage:
+#   docker-compose up -d        # Start
+#   docker-compose logs -f      # View logs
+#   docker-compose down         # Stop
+#   docker-compose pull && docker-compose up -d  # Update
+
+version: "3.8"
+
+services:
+  jebao-mqtt:
+    build: .
+    # Or use pre-built image:
+    # image: ghcr.io/YOUR_USERNAME/jebao-mqtt-bridge:latest
+    container_name: jebao-mqtt-bridge
+    restart: unless-stopped
+    
+    # ===========================================
+    # BLE ACCESS - Choose ONE of these options:
+    # ===========================================
+    
+    # OPTION 1: Full host network + privileged (simplest, works everywhere)
+    network_mode: host
+    privileged: true
+    
+    # OPTION 2: More restrictive (may not work on all systems)
+    # network_mode: host
+    # cap_add:
+    #   - NET_ADMIN
+    #   - NET_RAW
+    # devices:
+    #   - /dev/hci0:/dev/hci0
+    
+    # ===========================================
+    
+    volumes:
+      # D-Bus socket for BlueZ communication
+      - /var/run/dbus:/var/run/dbus:ro
+      
+      # Configuration file
+      - ./config.yaml:/app/config.yaml:ro
+      
+      # Optional: persist logs
+      # - ./logs:/app/logs
+    
+    environment:
+      - LOG_LEVEL=INFO
+      # Override config via environment (optional)
+      # - MQTT_HOST=192.168.1.100
+      # - MQTT_PORT=1883
+    
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ===========================================
+  # OPTIONAL: Include Mosquitto MQTT broker
+  # ===========================================
+  # mosquitto:
+  #   image: eclipse-mosquitto:2
+  #   container_name: mosquitto
+  #   restart: unless-stopped
+  #   ports:
+  #     - "1883:1883"
+  #   volumes:
+  #     - ./mosquitto/config:/mosquitto/config
+  #     - ./mosquitto/data:/mosquitto/data
+  #     - ./mosquitto/log:/mosquitto/log

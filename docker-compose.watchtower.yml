@@ -1,0 +1,42 @@
+# docker-compose.watchtower.yml
+#
+# Auto-update Docker containers when new images are pushed
+# 
+# Usage:
+#   docker-compose -f docker-compose.yml -f docker-compose.watchtower.yml up -d
+#
+# Or merge into main docker-compose.yml
+
+version: "3.8"
+
+services:
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # Check for updates every 5 minutes
+      - WATCHTOWER_POLL_INTERVAL=300
+      
+      # Only update containers with this label
+      - WATCHTOWER_LABEL_ENABLE=true
+      
+      # Clean up old images
+      - WATCHTOWER_CLEANUP=true
+      
+      # Notifications (optional - uncomment and configure)
+      # - WATCHTOWER_NOTIFICATIONS=shoutrrr
+      # - WATCHTOWER_NOTIFICATION_URL=pushover://shoutrrr:token@userkey
+      
+      # Or use generic webhook
+      # - WATCHTOWER_NOTIFICATION_URL=generic+https://ntfy.sh/your-topic
+    
+    # Only run on schedule (optional - saves resources on Pi Zero)
+    # command: --schedule "0 0 4 * * *"  # 4 AM daily
+
+  # Add this label to jebao-mqtt in main compose file:
+  jebao-mqtt:
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"

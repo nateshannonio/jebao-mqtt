@@ -1,0 +1,39 @@
+# Jebao MQTT Bridge Configuration
+# 
+# This file configures the MQTT bridge for Jebao aquarium pumps.
+# Edit the values below to match your setup.
+
+mqtt:
+  # MQTT Broker connection
+  host: localhost          # MQTT broker hostname or IP
+  port: 1883               # MQTT broker port (default: 1883)
+  
+  # Authentication (optional - set to null if not required)
+  username: null           # MQTT username
+  password: null           # MQTT password
+  
+  # Home Assistant integration
+  discovery_prefix: homeassistant  # HA MQTT discovery prefix
+  topic_prefix: jebao              # Prefix for pump topics
+
+# Pump configurations
+# Add each pump with its BLE MAC address
+pumps:
+  - name: "Wavemaker 1"           # Friendly name (shown in Home Assistant)
+    mac: "XX:XX:XX:XX:XX:XX"      # BLE MAC address (find with 'bluetoothctl scan on')
+    
+    # Optional: Override defaults for this pump model
+    # flow_min: 30                # Minimum flow % (DMP-65 default: 30)
+    # flow_max: 100               # Maximum flow %
+    # frequency_min: 5            # Minimum frequency in seconds
+    # frequency_max: 20           # Maximum frequency in seconds
+
+  # Example: Add a second pump
+  # - name: "Wavemaker 2"
+  #   mac: "YY:YY:YY:YY:YY:YY"
+
+  # Example: Different pump model with different limits
+  # - name: "Return Pump"
+  #   mac: "ZZ:ZZ:ZZ:ZZ:ZZ:ZZ"
+  #   flow_min: 20
+  #   flow_max: 100

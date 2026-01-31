@@ -1,0 +1,21 @@
+[Unit]
+Description=Jebao Pump MQTT Bridge
+After=network.target bluetooth.target
+
+[Service]
+Type=simple
+User=JEBAO_USER
+WorkingDirectory=JEBAO_REPO_DIR
+ExecStart=/usr/bin/python3 JEBAO_REPO_DIR/jebao_mqtt_bridge.py --config JEBAO_REPO_DIR/config.yaml
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+# Give access to Bluetooth
+SupplementaryGroups=bluetooth
+
+[Install]
+WantedBy=multi-user.target

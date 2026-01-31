@@ -1,0 +1,320 @@
+# Home Assistant Configuration for Jebao Pump Monitoring
+#
+# This file contains configuration examples for integrating
+# the Jebao MQTT Bridge with Home Assistant, including
+# historical data, graphs, and dashboards.
+
+# ============================================
+# HOW DATA FLOWS
+# ============================================
+#
+# Pump → Bridge → MQTT → HA MQTT Integration → Entities → Recorder → History
+#
+# The bridge publishes state every 60 seconds, ensuring regular data points
+# for graphing even when values don't change.
+
+# ============================================
+# ENTITIES CREATED (Auto-Discovery)
+# ============================================
+#
+# For each pump "wavemaker_1", you get:
+#
+# Controls:
+#   switch.wavemaker_1_power          - Turn pump on/off
+#   switch.wavemaker_1_feed_mode      - 10-min feed mode
+#   number.wavemaker_1_flow           - Set flow 30-100%
+#   number.wavemaker_1_frequency      - Set frequency 5-20s
+#   select.wavemaker_1_mode           - Wave mode selection
+#
+# Sensors (for statistics/graphs):
+#   sensor.wavemaker_1_flow_level     - Flow % (state_class: measurement)
+#   sensor.wavemaker_1_frequency_level - Frequency (state_class: measurement)
+#   sensor.wavemaker_1_runtime_today  - Hours running (state_class: total_increasing)
+#   binary_sensor.wavemaker_1_connected - Connection status
+
+# ============================================
+# STATISTICS & LONG-TERM DATA
+# ============================================
+#
+# Sensors with state_class: measurement automatically get:
+# - Mean, min, max per hour
+# - Long-term statistics (kept forever)
+# - Works with Energy Dashboard pattern
+#
+# View statistics:
+#   Developer Tools → Statistics → Search "wavemaker"
+
+# ============================================
+# RECORDER CONFIGURATION
+# ============================================
+# Add to configuration.yaml to customize retention:
+
+recorder:
+  # Keep detailed history for 14 days (default is 10)
+  purge_keep_days: 14
+  
+  # Commit to database every 5 seconds (better for real-time graphs)
+  commit_interval: 5
+  
+  # Include only what we need (saves database space)
+  include:
+    entity_globs:
+      - sensor.wavemaker_*
+      - switch.wavemaker_*
+      - number.wavemaker_*
+      - select.wavemaker_*
+      - binary_sensor.wavemaker_*
+
+# ============================================
+# INFLUXDB (Optional - for longer history)
+# ============================================
+# If you want years of data, add InfluxDB:
+
+# influxdb:
+#   host: localhost
+#   port: 8086
+#   database: home_assistant
+#   include:
+#     entity_globs:
+#       - sensor.wavemaker_*
+
+# ============================================
+# DASHBOARD CARDS
+# ============================================
+
+# --- Pump Control Card ---
+# Add this to your Lovelace dashboard:
+
+type: entities
+title: Aquarium Wavemaker
+show_header_toggle: false
+entities:
+  - entity: switch.wavemaker_1_power
+    name: Power
+  - entity: switch.wavemaker_1_feed_mode
+    name: Feed Mode
+  - type: divider
+  - entity: number.wavemaker_1_flow
+    name: Flow
+  - entity: number.wavemaker_1_frequency  
+    name: Frequency
+  - entity: select.wavemaker_1_mode
+    name: Mode
+  - type: divider
+  - entity: sensor.wavemaker_1_runtime_today
+    name: Runtime Today
+  - entity: binary_sensor.wavemaker_1_connected
+    name: Connected
+
+# --- Flow History Graph ---
+
+type: history-graph
+title: Flow History (24h)
+hours_to_show: 24
+entities:
+  - entity: sensor.wavemaker_1_flow_level
+    name: Flow %
+
+# --- Statistics Graph (Long-term) ---
+
+type: statistics-graph
+title: Flow Over Time
+period: day
+stat_types:
+  - mean
+  - min
+  - max
+entities:
+  - sensor.wavemaker_1_flow_level
+
+# --- Mini Graph Card (requires HACS) ---
+# Install via HACS: mini-graph-card
+
+type: custom:mini-graph-card
+name: Pump Flow
+entities:
+  - entity: sensor.wavemaker_1_flow_level
+    name: Flow
+hours_to_show: 168  # 7 days
+points_per_hour: 1
+line_width: 2
+show:
+  labels: true
+  points: false
+  legend: false
+
+# --- ApexCharts Card (requires HACS) ---
+# Install via HACS: apexcharts-card
+
+type: custom:apexcharts-card
+header:
+  show: true
+  title: Pump Statistics
+graph_span: 7d
+span:
+  end: day
+series:
+  - entity: sensor.wavemaker_1_flow_level
+    name: Flow %
+    type: line
+    stroke_width: 2
+    statistics:
+      type: mean
+      period: hour
+  - entity: sensor.wavemaker_1_runtime_today
+    name: Runtime (h)
+    type: column
+    statistics:
+      type: max
+      period: day
+
+# ============================================
+# COMPLETE DASHBOARD EXAMPLE
+# ============================================
+
+type: vertical-stack
+cards:
+  # Header with status
+  - type: horizontal-stack
+    cards:
+      - type: entity
+        entity: switch.wavemaker_1_power
+        name: Power
+        icon: mdi:power
+      - type: entity
+        entity: binary_sensor.wavemaker_1_connected
+        name: Connected
+      - type: entity
+        entity: sensor.wavemaker_1_runtime_today
+        name: Runtime
+        
+  # Controls
+  - type: entities
+    entities:
+      - entity: number.wavemaker_1_flow
+      - entity: number.wavemaker_1_frequency
+      - entity: select.wavemaker_1_mode
+      - entity: switch.wavemaker_1_feed_mode
+        
+  # Graph
+  - type: history-graph
+    hours_to_show: 24
+    entities:
+      - sensor.wavemaker_1_flow_level
+      - sensor.wavemaker_1_frequency_level
+
+# ============================================
+# AUTOMATIONS
+# ============================================
+
+automation:
+  # Feed time
+  - alias: "Aquarium Feed Time Morning"
+    trigger:
+      - platform: time
+        at: "08:00:00"
+    action:
+      - service: switch.turn_on
+        target:
+          entity_id: switch.wavemaker_1_feed_mode
+
+  # Night mode (reduce flow)
+  - alias: "Aquarium Night Mode"
+    trigger:
+      - platform: time
+        at: "22:00:00"
+    action:
+      - service: number.set_value
+        target:
+          entity_id: number.wavemaker_1_flow
+        data:
+          value: 40
+          
+  # Day mode (full flow)
+  - alias: "Aquarium Day Mode"
+    trigger:
+      - platform: time
+        at: "08:00:00"
+    action:
+      - service: number.set_value
+        target:
+          entity_id: number.wavemaker_1_flow
+        data:
+          value: 70
+
+  # Alert on disconnect
+  - alias: "Pump Disconnected Alert"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.wavemaker_1_connected
+        to: "off"
+        for:
+          minutes: 5
+    action:
+      - service: notify.notify
+        data:
+          title: "Aquarium Alert"
+          message: "Wavemaker disconnected for 5 minutes!"
+
+  # Weekly runtime summary
+  - alias: "Weekly Pump Runtime Summary"
+    trigger:
+      - platform: time
+        at: "09:00:00"
+    condition:
+      - condition: time
+        weekday:
+          - sun
+    action:
+      - service: notify.notify
+        data:
+          title: "Weekly Pump Summary"
+          message: >
+            Wavemaker ran for {{ states('sensor.wavemaker_1_runtime_today') }} hours today.
+
+# ============================================
+# TEMPLATE SENSORS (Optional)
+# ============================================
+# Add custom calculated sensors:
+
+template:
+  - sensor:
+      # Weekly average flow
+      - name: "Wavemaker Weekly Avg Flow"
+        unit_of_measurement: "%"
+        state: >
+          {{ state_attr('sensor.wavemaker_1_flow_level', 'mean') | default(0) | round(1) }}
+          
+      # Pump status text
+      - name: "Wavemaker Status"
+        state: >
+          {% if is_state('binary_sensor.wavemaker_1_connected', 'off') %}
+            Disconnected
+          {% elif is_state('switch.wavemaker_1_feed_mode', 'on') %}
+            Feed Mode
+          {% elif is_state('switch.wavemaker_1_power', 'on') %}
+            Running ({{ states('sensor.wavemaker_1_flow_level') }}%)
+          {% else %}
+            Off
+          {% endif %}
+
+# ============================================
+# WEBHOOK FOR PI ALERTS
+# ============================================
+# The Pi monitoring can send alerts via webhook:
+
+automation:
+  - alias: "Pi Alert Notification"
+    trigger:
+      - platform: webhook
+        webhook_id: pi-alerts
+        allowed_methods:
+          - POST
+    action:
+      - service: notify.notify
+        data:
+          title: "{{ trigger.json.title }}"
+          message: "{{ trigger.json.message }}"
+
+# Webhook URL: http://<ha-ip>:8123/api/webhook/pi-alerts
+# Set this as HA_WEBHOOK in your Pi's .env file

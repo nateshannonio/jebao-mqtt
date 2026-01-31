@@ -1,0 +1,14 @@
+# /etc/systemd/system/jebao-mqtt-update.service
+#
+# Service triggered by timer to run update script
+# Installed by setup.sh with correct paths
+
+[Unit]
+Description=Update Jebao MQTT Bridge from GitHub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=JEBAO_USER
+ExecStart=JEBAO_REPO_DIR/scripts/update.sh
