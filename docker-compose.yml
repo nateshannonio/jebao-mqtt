@@ -14,7 +14,6 @@ services:
   jebao-mqtt:
     build: .
     # Or use pre-built image:
-    # image: ghcr.io/nateshannonio/jebao-mqtt-bridge:latest
     container_name: jebao-mqtt-bridge
     restart: unless-stopped
     
@@ -64,17 +63,41 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    
+    depends_on:
+      - mosquitto
 
   # ===========================================
-  # OPTIONAL: Include Mosquitto MQTT broker
+  # MQTT Broker (Mosquitto)
   # ===========================================
-  # mosquitto:
-  #   image: eclipse-mosquitto:2
-  #   container_name: mosquitto
-  #   restart: unless-stopped
-  #   ports:
-  #     - "1883:1883"
-  #   volumes:
-  #     - ./mosquitto/config:/mosquitto/config
-  #     - ./mosquitto/data:/mosquitto/data
-  #     - ./mosquitto/log:/mosquitto/log
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"      # MQTT
+      - "9001:9001"      # WebSocket (optional)
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    # Create default config on first run
+    entrypoint: >
+      sh -c '
+        mkdir -p /mosquitto/config /mosquitto/data /mosquitto/log &&
+        if [ ! -f /mosquitto/config/mosquitto.conf ]; then
+          echo "listener 1883 0.0.0.0" > /mosquitto/config/mosquitto.conf &&
+          echo "listener 9001 0.0.0.0" >> /mosquitto/config/mosquitto.conf &&
+          echo "protocol websockets" >> /mosquitto/config/mosquitto.conf &&
+          echo "allow_anonymous true" >> /mosquitto/config/mosquitto.conf &&
+          echo "persistence true" >> /mosquitto/config/mosquitto.conf &&
+          echo "persistence_location /mosquitto/data/" >> /mosquitto/config/mosquitto.conf &&
+          echo "log_dest file /mosquitto/log/mosquitto.log" >> /mosquitto/config/mosquitto.conf;
+        fi &&
+        mosquitto -c /mosquitto/config/mosquitto.conf
+      '
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-h", "localhost", "-t", "healthcheck", "-m", "ping", "-q", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

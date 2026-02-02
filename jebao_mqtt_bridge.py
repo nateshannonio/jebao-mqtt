@@ -15,6 +15,7 @@ import asyncio
 import argparse
 import json
 import logging
+import random
 import signal
 import sys
 import time
@@ -102,7 +103,7 @@ class PumpConfig:
 class JebaoPump:
     """Handles BLE communication with a single Jebao pump"""
     
-    def __init__(self, config: PumpConfig, state_callback: Callable):
+    def __init__(self, config: PumpConfig, state_callback: Callable, pump_index: int = 0):
         self.config = config
         self.state_callback = state_callback
         self.state = PumpState()
@@ -111,7 +112,10 @@ class JebaoPump:
         self.command_sn = 1
         self.authenticated = False
         self._connect_lock = asyncio.Lock()
-        self._reconnect_task: Optional[asyncio.Task] = None
+        self._reconnect_task = None
+        self._running = True  # Flag to stop reconnect on shutdown
+        self._loop: Optional[asyncio.AbstractEventLoop] = None  # Event loop reference
+        self._pump_index = pump_index  # Used to stagger reconnection attempts
         
     def _make_packet(self, cmd: int, payload: bytes = b'') -> bytes:
         """Build a Gizwits protocol packet"""
@@ -246,6 +250,9 @@ class JebaoPump:
         async with self._connect_lock:
             if self.client and self.client.is_connected:
                 return True
+            
+            # Store event loop reference for callbacks
+            self._loop = asyncio.get_running_loop()
                 
             try:
                 logger.info(f"[{self.config.name}] Connecting to {self.config.mac}...")
@@ -272,47 +279,106 @@ class JebaoPump:
                     await asyncio.sleep(0.1)
                 
                 logger.warning(f"[{self.config.name}] Authentication timeout")
+                await self._cleanup_connection()
                 return False
                 
             except BleakError as e:
                 logger.error(f"[{self.config.name}] Connection failed: {e}")
+                await self._cleanup_connection()
+                return False
+            except Exception as e:
+                logger.error(f"[{self.config.name}] Unexpected error during connect: {e}")
+                await self._cleanup_connection()
                 return False
     
+    async def _cleanup_connection(self):
+        """Clean up connection state"""
+        self.authenticated = False
+        self.state.connected = False
+        if self.client:
+            try:
+                await self.client.disconnect()
+            except Exception:
+                pass
+            self.client = None
+    
     def _on_disconnect(self, client):
-        """Handle disconnection"""
+        """Handle disconnection - called from BLE callback"""
         logger.warning(f"[{self.config.name}] Disconnected")
         self.authenticated = False
         self.state.connected = False
-        self.state_callback(self)
+        self.state.state_initialized = False  # Reset so we don't publish stale data
         
-        # Schedule reconnect
-        if self._reconnect_task is None or self._reconnect_task.done():
-            self._reconnect_task = asyncio.create_task(self._reconnect_loop())
+        # Notify state change
+        try:
+            self.state_callback(self)
+        except Exception as e:
+            logger.error(f"[{self.config.name}] Error in state callback: {e}")
+        
+        # Schedule reconnect in the event loop
+        if self._loop is not None:
+            try:
+                # Check if there's already a reconnect task running
+                if self._reconnect_task is None or self._reconnect_task.done():
+                    self._reconnect_task = asyncio.run_coroutine_threadsafe(
+                        self._reconnect_loop(), self._loop
+                    )
+            except Exception as e:
+                logger.error(f"[{self.config.name}] Failed to schedule reconnect: {e}")
     
     async def _reconnect_loop(self):
         """Attempt to reconnect with backoff"""
         delay = 5
-        max_delay = 60
+        max_delay = 300  # Max 5 minutes between attempts
+        max_attempts = 0  # 0 = infinite
+        attempts = 0
+        
+        # Stagger reconnection attempts for multiple pumps to avoid BLE adapter contention
+        # Each pump waits an additional 2 seconds based on its index
+        stagger_delay = self._pump_index * 2
+        if stagger_delay > 0:
+            logger.info(f"[{self.config.name}] Staggering reconnect by {stagger_delay}s")
+            await asyncio.sleep(stagger_delay)
         
         while not self.authenticated:
-            logger.info(f"[{self.config.name}] Reconnecting in {delay}s...")
-            await asyncio.sleep(delay)
-            
-            if await self.connect():
+            attempts += 1
+            if max_attempts > 0 and attempts > max_attempts:
+                logger.error(f"[{self.config.name}] Max reconnection attempts reached")
                 break
                 
-            delay = min(delay * 2, max_delay)
+            logger.info(f"[{self.config.name}] Reconnecting in {delay}s... (attempt {attempts})")
+            await asyncio.sleep(delay)
+            
+            # Check if we should still be trying
+            if not self._running:
+                logger.info(f"[{self.config.name}] Stopping reconnect - bridge shutting down")
+                break
+            
+            try:
+                if await self.connect():
+                    logger.info(f"[{self.config.name}] Reconnection successful")
+                    break
+            except Exception as e:
+                logger.error(f"[{self.config.name}] Reconnection attempt failed: {e}")
+            
+            # Exponential backoff with jitter to prevent synchronized retries
+            jitter = random.uniform(0, delay * 0.1)  # Up to 10% jitter
+            delay = min(delay * 2 + jitter, max_delay)
+        
+        logger.debug(f"[{self.config.name}] Reconnect loop ended")
     
     async def disconnect(self):
         """Disconnect from the pump"""
+        self._running = False
+        
         if self._reconnect_task:
-            self._reconnect_task.cancel()
+            try:
+                if hasattr(self._reconnect_task, 'cancel'):
+                    self._reconnect_task.cancel()
+            except Exception:
+                pass
             
-        if self.client and self.client.is_connected:
-            await self.client.disconnect()
-            
-        self.authenticated = False
-        self.state.connected = False
+        await self._cleanup_connection()
     
     # Control methods
     async def set_power(self, on: bool):
@@ -695,15 +761,17 @@ class MQTTBridge:
         self.mqtt_client.loop_start()
         
         # Create pump instances
-        for pump_config in self.config.get('pumps', []):
+        for index, pump_config in enumerate(self.config.get('pumps', [])):
             pc = PumpConfig(**pump_config)
-            pump = JebaoPump(pc, self._on_pump_state_change)
+            pump = JebaoPump(pc, self._on_pump_state_change, pump_index=index)
             self.pumps[pc.id] = pump
             logger.info(f"Configured pump: {pc.name} ({pc.mac})")
         
-        # Connect to all pumps
-        connect_tasks = [pump.connect() for pump in self.pumps.values()]
-        await asyncio.gather(*connect_tasks)
+        # Connect to all pumps (staggered to avoid BLE contention)
+        for index, pump in enumerate(self.pumps.values()):
+            if index > 0:
+                await asyncio.sleep(2)  # 2 second delay between initial connections
+            asyncio.create_task(pump.connect())
         
         # Start periodic state publisher for better graphs
         asyncio.create_task(self._periodic_state_publisher())
