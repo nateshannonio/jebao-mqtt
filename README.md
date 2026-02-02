@@ -4,11 +4,12 @@ A Python service that connects Jebao DMP series aquarium wavemaker pumps to Home
 
 ## Compatibility
 
-| Jebao Product | Tested |
-|---------------|--------|
-| DMP           | ✅ Yes |
-| MDP           | ❓ Unknown |
-| SLW           | ❓ Unknown |
+| Series | Model | Tested | Notes |
+|--------|-------|--------|-------|
+| DMP | DMP-40 | ✅ | Fully tested |
+| DMP | DMP-65 | ✅ | Fully tested |
+| MDP | MDP-5000 | ❓ | Should work, untested |
+| SLW | SLW-20 | ❓ | Should work, untested |
 
 ## Features
 
