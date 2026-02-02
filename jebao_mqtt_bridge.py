@@ -346,7 +346,7 @@ class JebaoPump:
                 logger.error(f"[{self.config.name}] Max reconnection attempts reached")
                 break
                 
-            logger.info(f"[{self.config.name}] Reconnecting in {delay}s... (attempt {attempts})")
+            logger.info(f"[{self.config.name}] Reconnecting in {delay:.1f}s... (attempt {attempts})")
             await asyncio.sleep(delay)
             
             # Check if we should still be trying
