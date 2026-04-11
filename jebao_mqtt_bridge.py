@@ -45,22 +45,36 @@ CMD_GET_PASSCODE = 0x0006
 CMD_LOGIN = 0x0008
 CMD_CONTROL = 0x0093
 
-# Attribute definitions (type, attr_hi, attr_lo)
+# DMP Attribute definitions (type, attr_hi, attr_lo)
 ATTR_POWER = (0x00, 0x00, 0x01)
 ATTR_FEED = (0x00, 0x00, 0x04)
 ATTR_MODE = (0x00, 0x10, 0x02)
 ATTR_FLOW = (0x00, 0x80, 0x00)
 ATTR_FREQUENCY = (0x01, 0x00, 0x00)
 
-# Mode mappings (BLE value -> Display name)
-MODES = {
+# MDP Attribute definitions (Gizwits bitmap flags)
+MDP_ATTR_POWER = 0  # SwitchON - bit 0
+MDP_ATTR_FEED = 1   # Feed mode - bit 1
+MDP_ATTR_SPEED = 5  # Motor_Speed - uint8 value follows flags
+
+# Mode mappings (BLE value -> Display name) - DMP only
+DMP_MODES = {
     0: "Classic Wave",   # Mode 1 on controller
     1: "Cross-flow",     # Mode 5 on controller
     2: "Sine Wave",      # Mode 2 on controller
     4: "Random",         # Mode 4 on controller
     6: "Constant",       # Mode 3 on controller
 }
-MODE_VALUES = {v: k for k, v in MODES.items()}
+DMP_MODE_VALUES = {v: k for k, v in DMP_MODES.items()}
+
+# MDP doesn't have modes - just speed control
+# Maintain compatibility
+MODES = DMP_MODES
+MODE_VALUES = DMP_MODE_VALUES
+
+# Pump type enum
+PUMP_TYPE_DMP = "DMP"
+PUMP_TYPE_MDP = "MDP"
 
 # Statistics configuration
 STATE_PUBLISH_INTERVAL = 60  # Publish state every 60 seconds for better graphs
@@ -78,6 +92,9 @@ class PumpState:
     # Runtime tracking
     power_on_time: float = 0.0  # Timestamp when power turned on
     runtime_today: float = 0.0  # Hours running today
+    # Feed mode tracking (MDP)
+    feed_end_time: float = 0.0  # Timestamp when feed mode should end
+    pre_feed_flow: int = 50  # Speed before feed mode started
     last_runtime_reset: str = ""  # Date of last reset (YYYY-MM-DD)
     # Track if we've received actual state from pump
     state_initialized: bool = False
@@ -88,21 +105,55 @@ class PumpConfig:
     """Configuration for a single pump"""
     name: str
     mac: str
+    pump_type: str = PUMP_TYPE_DMP  # DMP or MDP
     id: str = ""
     flow_min: int = 30
     flow_max: int = 100
     frequency_min: int = 5
     frequency_max: int = 20
-    
+    model: str = ""  # e.g., "DMP-65", "MDP-5000"
+    control_mode: str = ""  # "read_only" or "full" (default depends on pump_type)
+    poll_interval: int = 30  # Status poll interval in seconds (MDP only)
+
     def __post_init__(self):
         if not self.id:
             # Generate ID from name
             self.id = self.name.lower().replace(" ", "_").replace("-", "_")
 
+        # Set default model if not specified
+        if not self.model:
+            if self.pump_type == PUMP_TYPE_MDP:
+                self.model = "MDP-5000"
+            else:
+                self.model = "DMP-65"
+
+        # Set default control_mode based on pump type
+        if not self.control_mode:
+            if self.pump_type == PUMP_TYPE_MDP:
+                self.control_mode = "read_only"  # MDP write protocol is still a TODO
+            else:
+                self.control_mode = "full"
+
+        # Adjust defaults for MDP pumps
+        if self.pump_type == PUMP_TYPE_MDP:
+            # MDP pumps have different speed ranges
+            if self.flow_min == 30:  # Default wasn't overridden
+                self.flow_min = 30  # MDP speed range 30-100
+            # MDP doesn't have frequency control
+            self.frequency_min = 0
+            self.frequency_max = 0
+
 
 class JebaoPump:
     """Handles BLE communication with a single Jebao pump"""
     
+    # MDP status response layout (from APK product config schema)
+    MDP_P0_START = 12        # P0 starts at byte 12 of reassembled packet
+    MDP_DEVDATA_START = 25   # Device data starts at P0[25] (after product key prefix)
+    # Device data byte offsets (after action byte):
+    #   [0] action, [1] bools, [2] Motor_Speed, [3] FeedTime, [4] AutoGears, [5] AutoFeedTime
+    # Bools byte bits: 0=SwitchON, 1=Mode, 2=FeedSwitch, 3=TimerON, 4-5=AutoMode
+
     def __init__(self, config: PumpConfig, state_callback: Callable, pump_index: int = 0):
         self.config = config
         self.state_callback = state_callback
@@ -116,6 +167,10 @@ class JebaoPump:
         self._running = True  # Flag to stop reconnect on shutdown
         self._loop: Optional[asyncio.AbstractEventLoop] = None  # Event loop reference
         self._pump_index = pump_index  # Used to stagger reconnection attempts
+        self._poll_task = None  # MDP status polling task
+        # MDP packet reassembly (BLE notifications are fragmented at 20-byte MTU)
+        self._reassemble_buffer = bytearray()
+        self._reassemble_expected = 0
         
     def _make_packet(self, cmd: int, payload: bytes = b'') -> bytes:
         """Build a Gizwits protocol packet"""
@@ -124,7 +179,7 @@ class JebaoPump:
                cmd.to_bytes(2, 'big') + payload
     
     def _make_write_p0(self, attr: tuple, value: int) -> bytes:
-        """Build P0 data for writing an attribute"""
+        """Build P0 data for writing an attribute (DMP format)"""
         p0 = bytearray(11)
         p0[0] = 0x11  # Write action
         p0[7] = attr[0]  # Type
@@ -133,21 +188,95 @@ class JebaoPump:
         p0[10] = value
         return bytes(p0)
     
+    def _make_write_p0_mdp(self, attrs: dict) -> bytes:
+        """Build P0 data for writing attributes (MDP Gizwits format)"""
+        action = 0x01  # Write action
+        
+        # Use the simple, stable format discovered through testing
+        # Format 1-4 from test-mdp-formats.py were successful
+        
+        # Build flag byte from attributes
+        flag_byte = 0x00
+        
+        if 'power' in attrs and attrs['power']:
+            flag_byte |= (1 << MDP_ATTR_POWER)  # Set power bit
+            
+        if 'feed' in attrs and attrs['feed']:
+            flag_byte |= (1 << MDP_ATTR_FEED)   # Set feed mode bit
+        
+        # Handle different command types
+        if 'feed' in attrs:
+            # Feed mode command - simple flag-based
+            if attrs['feed']:
+                # Enable feed mode
+                payload = bytes([action, flag_byte])
+            else:
+                # Disable feed mode - clear feed bit but preserve power
+                power_bit = (1 << MDP_ATTR_POWER) if self.state.power else 0
+                payload = bytes([action, power_bit])
+        elif 'power' in attrs and 'speed' not in attrs:
+            # Power-only command - use simple format
+            payload = bytes([action, flag_byte])
+        elif 'speed' in attrs:
+            # Speed command - use format 1 from tests (most reliable)
+            # action + flag + speed_value
+            if 'power' not in attrs:
+                # Keep current power state when changing speed
+                flag_byte = (1 << MDP_ATTR_POWER) if self.state.power else 0
+            payload = bytes([action, flag_byte, attrs['speed']])
+        else:
+            # Fallback - minimal command
+            payload = bytes([action, flag_byte])
+        
+        return payload
+    
+    def _reassemble_feed(self, data: bytes) -> list:
+        """Feed a BLE notification into the reassembly buffer.
+        Returns list of completed Gizwits packets (may be empty)."""
+        completed = []
+        if not self._reassemble_buffer:
+            if len(data) >= 5 and data[:4] == bytes([0x00, 0x00, 0x00, 0x03]):
+                self._reassemble_expected = 5 + data[4]
+                self._reassemble_buffer.extend(data)
+            else:
+                return completed
+        else:
+            self._reassemble_buffer.extend(data)
+
+        if len(self._reassemble_buffer) >= self._reassemble_expected > 0:
+            packet = bytes(self._reassemble_buffer[:self._reassemble_expected])
+            completed.append(packet)
+            remainder = bytes(self._reassemble_buffer[self._reassemble_expected:])
+            self._reassemble_buffer = bytearray()
+            self._reassemble_expected = 0
+            if remainder:
+                completed.extend(self._reassemble_feed(remainder))
+        return completed
+
     def _notification_handler(self, sender, data: bytes):
         """Handle incoming BLE notifications"""
+        if self.config.pump_type == PUMP_TYPE_MDP:
+            # MDP responses can be >20 bytes and arrive fragmented
+            packets = self._reassemble_feed(data)
+            for packet in packets:
+                self._handle_mdp_packet(packet)
+            return
+
+        # DMP: packets fit in a single notification
         if len(data) < 8:
             return
-            
+        self._handle_packet(data)
+
+    def _handle_packet(self, data: bytes):
+        """Handle a complete Gizwits packet (DMP path)"""
         cmd = int.from_bytes(data[6:8], 'big')
-        
+
         if cmd == 0x0007 and len(data) > 8:
-            # Passcode response
             self.passcode = data[8:]
             logger.debug(f"[{self.config.name}] Received passcode")
             asyncio.create_task(self._send_login())
-            
+
         elif cmd == 0x0009:
-            # Login response
             if len(data) > 8 and data[8] == 0x00:
                 logger.info(f"[{self.config.name}] Login successful")
                 self.authenticated = True
@@ -155,24 +284,52 @@ class JebaoPump:
                 self.state_callback(self)
             else:
                 logger.warning(f"[{self.config.name}] Login failed")
-                
-        elif cmd == 0x0093 and len(data) >= 19:
-            # Status update
-            p0 = data[12:]
-            if len(p0) >= 11:
-                type_byte = p0[7]
-                attr_hi = p0[8]
-                attr_lo = p0[9]
-                value = p0[10]
-                
-                self._update_state(type_byte, attr_hi, attr_lo, value)
-                
+
+        elif cmd == 0x0093:
+            if len(data) >= 12:
+                p0 = data[12:]
+                if len(p0) >= 11:
+                    self._update_state_dmp(p0[7], p0[8], p0[9], p0[10])
+
         elif cmd == 0x0094:
-            # ACK
+            logger.debug(f"[{self.config.name}] Command acknowledged")
+
+    def _handle_mdp_packet(self, data: bytes):
+        """Handle a complete reassembled Gizwits packet (MDP path)"""
+        if len(data) < 8:
+            return
+        cmd = int.from_bytes(data[6:8], 'big')
+        logger.debug(f"[{self.config.name}] MDP cmd=0x{cmd:04x} ({len(data)}B)")
+
+        if cmd == 0x0007 and len(data) > 8:
+            self.passcode = data[8:]
+            logger.debug(f"[{self.config.name}] Received passcode")
+            asyncio.create_task(self._send_login())
+
+        elif cmd == 0x0009:
+            if len(data) > 8 and data[8] == 0x00:
+                logger.info(f"[{self.config.name}] Login successful")
+                self.authenticated = True
+                self.state.connected = True
+                self.state_callback(self)
+                # Start MDP status polling
+                if self._poll_task is None or self._poll_task.done():
+                    self._poll_task = asyncio.create_task(self._mdp_poll_loop())
+            else:
+                logger.warning(f"[{self.config.name}] Login failed")
+
+        elif cmd == 0x0100:
+            # Full status response (211 bytes) — parse device data
+            self._parse_mdp_status(data)
+
+        elif cmd == 0x0062:
+            logger.debug(f"[{self.config.name}] MDP device ready notification")
+
+        elif cmd == 0x0094:
             logger.debug(f"[{self.config.name}] Command acknowledged")
     
-    def _update_state(self, type_byte: int, attr_hi: int, attr_lo: int, value: int):
-        """Update state from received attribute"""
+    def _update_state_dmp(self, type_byte: int, attr_hi: int, attr_lo: int, value: int):
+        """Update state from received attribute (DMP format)"""
         changed = False
         
         if type_byte == 0x00 and attr_hi == 0x00 and attr_lo == 0x01:
@@ -220,6 +377,92 @@ class JebaoPump:
             self.state.state_initialized = True
             self.state_callback(self)
     
+    def _parse_mdp_status(self, data: bytes):
+        """Parse MDP status from a reassembled 0x0100 response packet.
+
+        Status response structure (211 bytes total):
+          data[0:12]  - Gizwits header (4B header + 1B length + 1B flags + 2B cmd + 4B sn)
+          data[12:37] - P0 prefix: [dynamic, 0x00, 0x16, <22-byte product key>]
+          data[37:]   - Device data: [action, bools, speed, feedtime, autogears, ...]
+
+        Device data bools byte (from APK product config schema):
+          bit 0: SwitchON, bit 1: Mode, bit 2: FeedSwitch, bit 3: TimerON, bits 4-5: AutoMode
+        """
+        dd_offset = self.MDP_P0_START + self.MDP_DEVDATA_START  # 12 + 25 = 37
+        if len(data) < dd_offset + 6:
+            logger.debug(f"[{self.config.name}] MDP status too short: {len(data)}B")
+            return
+
+        devdata = data[dd_offset:]
+        bools_byte = devdata[1]
+        speed = devdata[2]
+        feedtime = devdata[3]
+
+        power_on = bool(bools_byte & 0x01)     # bit 0: SwitchON
+        feed_mode = bool(bools_byte & 0x04)    # bit 2: FeedSwitch
+        auto_mode = (bools_byte >> 4) & 0x03   # bits 4-5: AutoMode
+
+        changed = False
+
+        # Update power
+        if self.state.power != power_on:
+            now = time.time()
+            if power_on:
+                self.state.power_on_time = now
+            elif self.state.power_on_time > 0:
+                self.state.runtime_today += (now - self.state.power_on_time) / 3600
+                self.state.power_on_time = 0
+            self.state.power = power_on
+            changed = True
+            logger.info(f"[{self.config.name}] Power: {'ON' if power_on else 'OFF'}")
+
+        # Update feed mode
+        if self.state.feed != feed_mode:
+            self.state.feed = feed_mode
+            changed = True
+            logger.info(f"[{self.config.name}] Feed: {'ON' if feed_mode else 'OFF'}")
+
+        # Update speed
+        if self.state.flow != speed and 0 <= speed <= 100:
+            self.state.flow = speed
+            changed = True
+            logger.info(f"[{self.config.name}] Speed: {speed}%")
+
+        # Update mode (AutoMode enum)
+        if self.state.mode != auto_mode:
+            self.state.mode = auto_mode
+            changed = True
+            logger.debug(f"[{self.config.name}] AutoMode: {auto_mode}")
+
+        if changed or not self.state.state_initialized:
+            self.state.state_initialized = True
+            self.state_callback(self)
+            logger.debug(f"[{self.config.name}] Status: power={power_on} speed={speed}% feed={feed_mode}")
+
+    async def _mdp_poll_loop(self):
+        """Periodically poll MDP pump status via BLE"""
+        interval = self.config.poll_interval
+        logger.info(f"[{self.config.name}] Starting MDP status polling (every {interval}s)")
+        while self._running and self.authenticated:
+            try:
+                await self._mdp_request_status()
+            except Exception as e:
+                logger.debug(f"[{self.config.name}] Poll error: {e}")
+            await asyncio.sleep(interval)
+        logger.debug(f"[{self.config.name}] MDP poll loop ended")
+
+    async def _mdp_request_status(self):
+        """Send a status read request to MDP pump (cmd 0x93, action 0x02)"""
+        if not self.authenticated or not self.client or not self.client.is_connected:
+            return
+        payload = self.command_sn.to_bytes(4, 'big') + bytes([0x02, 0x00])
+        packet = self._make_packet(CMD_CONTROL, payload)
+        self.command_sn += 1
+        try:
+            await self.client.write_gatt_char(CHAR_UUID, packet, response=False)
+        except BleakError as e:
+            logger.debug(f"[{self.config.name}] Status request failed: {e}")
+    
     async def _send_login(self):
         """Send login packet with passcode"""
         if self.client and self.client.is_connected:
@@ -227,12 +470,31 @@ class JebaoPump:
             await self.client.write_gatt_char(CHAR_UUID, packet, response=False)
     
     async def _send_command(self, attr: tuple, value: int):
-        """Send a control command"""
+        """Send a control command (DMP format)"""
         if not self.authenticated or not self.client or not self.client.is_connected:
             logger.warning(f"[{self.config.name}] Cannot send - not connected")
             return False
             
         p0 = self._make_write_p0(attr, value)
+        payload = self.command_sn.to_bytes(4, 'big') + p0
+        packet = self._make_packet(CMD_CONTROL, payload)
+        
+        self.command_sn += 1
+        
+        try:
+            await self.client.write_gatt_char(CHAR_UUID, packet, response=False)
+            return True
+        except BleakError as e:
+            logger.error(f"[{self.config.name}] Send failed: {e}")
+            return False
+    
+    async def _send_command_mdp(self, attrs: dict):
+        """Send a control command (MDP Gizwits format)"""
+        if not self.authenticated or not self.client or not self.client.is_connected:
+            logger.warning(f"[{self.config.name}] Cannot send - not connected")
+            return False
+            
+        p0 = self._make_write_p0_mdp(attrs)
         payload = self.command_sn.to_bytes(4, 'big') + p0
         packet = self._make_packet(CMD_CONTROL, payload)
         
@@ -307,7 +569,9 @@ class JebaoPump:
         logger.warning(f"[{self.config.name}] Disconnected")
         self.authenticated = False
         self.state.connected = False
-        self.state.state_initialized = False  # Reset so we don't publish stale data
+        # Reset reassembly buffer
+        self._reassemble_buffer = bytearray()
+        self._reassemble_expected = 0
         
         # Notify state change
         try:
@@ -370,45 +634,146 @@ class JebaoPump:
     async def disconnect(self):
         """Disconnect from the pump"""
         self._running = False
-        
+
+        if self._poll_task and not self._poll_task.done():
+            self._poll_task.cancel()
+
         if self._reconnect_task:
             try:
                 if hasattr(self._reconnect_task, 'cancel'):
                     self._reconnect_task.cancel()
             except Exception:
                 pass
-            
+
         await self._cleanup_connection()
     
     # Control methods
+    def _is_read_only(self) -> bool:
+        return self.config.control_mode == "read_only"
+
     async def set_power(self, on: bool):
         logger.info(f"[{self.config.name}] Setting power: {'ON' if on else 'OFF'}")
-        return await self._send_command(ATTR_POWER, 1 if on else 0)
-    
+        if self.config.pump_type == PUMP_TYPE_MDP:
+            if self._is_read_only():
+                logger.warning(f"[{self.config.name}] Control not available (read_only mode)")
+                return False
+            # TODO: MDP write protocol not yet implemented
+            return await self._send_command_mdp({'power': on})
+        else:
+            return await self._send_command(ATTR_POWER, 1 if on else 0)
+
     async def set_feed(self, on: bool):
         logger.info(f"[{self.config.name}] Setting feed: {'ON' if on else 'OFF'}")
-        return await self._send_command(ATTR_FEED, 1 if on else 0)
-    
+        if self.config.pump_type == PUMP_TYPE_MDP:
+            if self._is_read_only():
+                logger.warning(f"[{self.config.name}] Control not available (read_only mode)")
+                return False
+            # TODO: MDP write protocol not yet implemented
+            if on:
+                return await self._start_feed_mode_mdp()
+            else:
+                return await self._end_feed_mode_mdp()
+        else:
+            return await self._send_command(ATTR_FEED, 1 if on else 0)
+
     async def set_flow(self, percent: int):
         percent = max(self.config.flow_min, min(self.config.flow_max, percent))
-        logger.info(f"[{self.config.name}] Setting flow: {percent}%")
-        return await self._send_command(ATTR_FLOW, percent)
-    
+        if self.config.pump_type == PUMP_TYPE_MDP:
+            if self._is_read_only():
+                logger.warning(f"[{self.config.name}] Control not available (read_only mode)")
+                return False
+            # TODO: MDP write protocol not yet implemented
+            logger.info(f"[{self.config.name}] Setting speed: {percent}%")
+            return await self._send_command_mdp({'speed': percent})
+        else:
+            logger.info(f"[{self.config.name}] Setting flow: {percent}%")
+            return await self._send_command(ATTR_FLOW, percent)
+
     async def set_frequency(self, seconds: int):
-        seconds = max(self.config.frequency_min, min(self.config.frequency_max, seconds))
-        logger.info(f"[{self.config.name}] Setting frequency: {seconds}s")
-        return await self._send_command(ATTR_FREQUENCY, seconds)
-    
+        if self.config.pump_type == PUMP_TYPE_MDP:
+            logger.warning(f"[{self.config.name}] MDP pumps don't support frequency control")
+            return False
+        else:
+            seconds = max(self.config.frequency_min, min(self.config.frequency_max, seconds))
+            logger.info(f"[{self.config.name}] Setting frequency: {seconds}s")
+            return await self._send_command(ATTR_FREQUENCY, seconds)
+
     async def set_mode(self, mode: int):
-        if mode in MODES:
-            logger.info(f"[{self.config.name}] Setting mode: {MODES[mode]}")
-            return await self._send_command(ATTR_MODE, mode)
-        return False
-    
+        if self.config.pump_type == PUMP_TYPE_MDP:
+            logger.warning(f"[{self.config.name}] MDP pumps don't support mode control")
+            return False
+        else:
+            if mode in MODES:
+                logger.info(f"[{self.config.name}] Setting mode: {MODES[mode]}")
+                return await self._send_command(ATTR_MODE, mode)
+            return False
+
     async def set_mode_by_name(self, mode_name: str):
-        if mode_name in MODE_VALUES:
-            return await self.set_mode(MODE_VALUES[mode_name])
-        return False
+        if self.config.pump_type == PUMP_TYPE_MDP:
+            logger.warning(f"[{self.config.name}] MDP pumps don't support mode control")
+            return False
+        else:
+            if mode_name in MODE_VALUES:
+                return await self.set_mode(MODE_VALUES[mode_name])
+            return False
+
+    async def _start_feed_mode_mdp(self) -> bool:
+        """Start MDP feed mode - stops pump for 2 minutes"""
+        logger.info(f"[{self.config.name}] Starting feed mode (2 min timer)")
+        
+        # Store current speed to restore later
+        self.state.pre_feed_flow = self.state.flow
+        
+        # Set feed end time (2 minutes from now)
+        self.state.feed_end_time = time.time() + 120  # 2 minutes
+        
+        # Send feed mode command (our current command that stops the pump)
+        success = await self._send_command_mdp({'feed': True})
+        
+        if success:
+            # Update state immediately
+            self.state.feed = True
+            self.state.power = False  # Pump stops during feed mode
+            
+            # Schedule automatic resume
+            asyncio.create_task(self._feed_timer_mdp())
+            
+        return success
+    
+    async def _end_feed_mode_mdp(self) -> bool:
+        """End MDP feed mode early - resume normal operation"""
+        logger.info(f"[{self.config.name}] Ending feed mode early")
+        
+        # Clear feed timer
+        self.state.feed_end_time = 0.0
+        
+        # Resume with previous speed
+        success = await self._send_command_mdp({
+            'power': True, 
+            'speed': self.state.pre_feed_flow
+        })
+        
+        if success:
+            self.state.feed = False
+            self.state.power = True
+            self.state.flow = self.state.pre_feed_flow
+            
+        return success
+    
+    async def _feed_timer_mdp(self):
+        """Background timer for MDP feed mode"""
+        try:
+            # Wait until feed time expires
+            while self.state.feed_end_time > time.time() and self.state.feed:
+                await asyncio.sleep(1.0)
+            
+            # If feed mode is still active, end it automatically
+            if self.state.feed and self.state.feed_end_time > 0:
+                logger.info(f"[{self.config.name}] Feed timer expired, resuming pump")
+                await self._end_feed_mode_mdp()
+                
+        except Exception as e:
+            logger.error(f"[{self.config.name}] Feed timer error: {e}")
 
 
 class MQTTBridge:
@@ -505,8 +870,23 @@ class MQTTBridge:
         """Subscribe to command topics for a pump"""
         mqtt_config = self._get_mqtt_config()
         prefix = mqtt_config['topic_prefix']
-        
-        topics = ['power', 'feed', 'flow', 'frequency', 'mode']
+
+        pump = self.pumps.get(pump_id)
+        if not pump:
+            return
+
+        # Read-only pumps don't need command subscriptions
+        if pump.config.control_mode == "read_only":
+            logger.debug(f"[{pump.config.name}] Read-only mode, skipping command subscriptions")
+            return
+
+        topics = ['power', 'flow']
+
+        if pump.config.pump_type == PUMP_TYPE_DMP:
+            topics.extend(['feed', 'frequency', 'mode'])
+        elif pump.config.pump_type == PUMP_TYPE_MDP:
+            topics.append('feed')
+
         for topic in topics:
             self.mqtt_client.subscribe(f"{prefix}/{pump_id}/{topic}/set")
     
@@ -521,100 +901,137 @@ class MQTTBridge:
             "identifiers": [f"jebao_{pump_id}"],
             "name": pump.config.name,
             "manufacturer": "Jebao",
-            "model": "DMP-65",
+            "model": pump.config.model,
         }
         
-        # Power switch
-        self._publish_discovery_entity(
-            discovery_prefix, "switch", pump_id, "power",
-            {
-                "name": "Power",
-                "command_topic": f"{topic_prefix}/{pump_id}/power/set",
-                "state_topic": f"{topic_prefix}/{pump_id}/power/state",
-                "payload_on": "ON",
-                "payload_off": "OFF",
-                "icon": "mdi:power",
-                "device": device_info,
-                "unique_id": f"jebao_{pump_id}_power",
-            }
-        )
+        read_only = pump.config.control_mode == "read_only"
+
+        if read_only:
+            # Read-only: publish power and feed as binary_sensor (no control)
+            self._publish_discovery_entity(
+                discovery_prefix, "binary_sensor", pump_id, "power",
+                {
+                    "name": "Power",
+                    "state_topic": f"{topic_prefix}/{pump_id}/power/state",
+                    "payload_on": "ON",
+                    "payload_off": "OFF",
+                    "icon": "mdi:power",
+                    "device": device_info,
+                    "unique_id": f"jebao_{pump_id}_power",
+                }
+            )
+            self._publish_discovery_entity(
+                discovery_prefix, "binary_sensor", pump_id, "feed",
+                {
+                    "name": "Feed Mode",
+                    "state_topic": f"{topic_prefix}/{pump_id}/feed/state",
+                    "payload_on": "ON",
+                    "payload_off": "OFF",
+                    "icon": "mdi:fish",
+                    "device": device_info,
+                    "unique_id": f"jebao_{pump_id}_feed",
+                }
+            )
+        else:
+            # Full control: publish power and feed as switches
+            self._publish_discovery_entity(
+                discovery_prefix, "switch", pump_id, "power",
+                {
+                    "name": "Power",
+                    "command_topic": f"{topic_prefix}/{pump_id}/power/set",
+                    "state_topic": f"{topic_prefix}/{pump_id}/power/state",
+                    "payload_on": "ON",
+                    "payload_off": "OFF",
+                    "icon": "mdi:power",
+                    "device": device_info,
+                    "unique_id": f"jebao_{pump_id}_power",
+                }
+            )
+            if pump.config.pump_type in [PUMP_TYPE_DMP, PUMP_TYPE_MDP]:
+                self._publish_discovery_entity(
+                    discovery_prefix, "switch", pump_id, "feed",
+                    {
+                        "name": "Feed Mode",
+                        "command_topic": f"{topic_prefix}/{pump_id}/feed/set",
+                        "state_topic": f"{topic_prefix}/{pump_id}/feed/state",
+                        "payload_on": "ON",
+                        "payload_off": "OFF",
+                        "icon": "mdi:fish",
+                        "device": device_info,
+                        "unique_id": f"jebao_{pump_id}_feed",
+                    }
+                )
+
+        # Flow/Speed - sensor for read_only, number for full control
+        flow_name = "Speed" if pump.config.pump_type == PUMP_TYPE_MDP else "Flow"
+        flow_icon = "mdi:speedometer" if pump.config.pump_type == PUMP_TYPE_MDP else "mdi:waves"
+
+        if read_only:
+            # Read-only: just a sensor, no command topic
+            pass  # The flow_sensor below handles this
+        else:
+            self._publish_discovery_entity(
+                discovery_prefix, "number", pump_id, "flow",
+                {
+                    "name": flow_name,
+                    "command_topic": f"{topic_prefix}/{pump_id}/flow/set",
+                    "state_topic": f"{topic_prefix}/{pump_id}/flow/state",
+                    "min": pump.config.flow_min,
+                    "max": pump.config.flow_max,
+                    "step": 1,
+                    "unit_of_measurement": "%",
+                    "icon": flow_icon,
+                    "device": device_info,
+                    "unique_id": f"jebao_{pump_id}_flow",
+                }
+            )
         
-        # Feed switch
-        self._publish_discovery_entity(
-            discovery_prefix, "switch", pump_id, "feed",
-            {
-                "name": "Feed Mode",
-                "command_topic": f"{topic_prefix}/{pump_id}/feed/set",
-                "state_topic": f"{topic_prefix}/{pump_id}/feed/state",
-                "payload_on": "ON",
-                "payload_off": "OFF",
-                "icon": "mdi:fish",
-                "device": device_info,
-                "unique_id": f"jebao_{pump_id}_feed",
-            }
-        )
+        # Flow/Speed sensor (for statistics/graphs)
+        sensor_name = "Speed Level" if pump.config.pump_type == PUMP_TYPE_MDP else "Flow Level"
         
-        # Flow number - with statistics support
-        self._publish_discovery_entity(
-            discovery_prefix, "number", pump_id, "flow",
-            {
-                "name": "Flow",
-                "command_topic": f"{topic_prefix}/{pump_id}/flow/set",
-                "state_topic": f"{topic_prefix}/{pump_id}/flow/state",
-                "min": pump.config.flow_min,
-                "max": pump.config.flow_max,
-                "step": 1,
-                "unit_of_measurement": "%",
-                "icon": "mdi:waves",
-                "device": device_info,
-                "unique_id": f"jebao_{pump_id}_flow",
-            }
-        )
-        
-        # Flow sensor (for statistics/graphs)
         self._publish_discovery_entity(
             discovery_prefix, "sensor", pump_id, "flow_sensor",
             {
-                "name": "Flow Level",
+                "name": sensor_name,
                 "state_topic": f"{topic_prefix}/{pump_id}/flow/state",
                 "unit_of_measurement": "%",
-                "icon": "mdi:waves",
+                "icon": flow_icon,
                 "device": device_info,
                 "unique_id": f"jebao_{pump_id}_flow_sensor",
                 "state_class": "measurement",  # Enables long-term statistics
             }
         )
         
-        # Frequency number - with statistics support
-        self._publish_discovery_entity(
-            discovery_prefix, "number", pump_id, "frequency",
-            {
-                "name": "Frequency",
-                "command_topic": f"{topic_prefix}/{pump_id}/frequency/set",
-                "state_topic": f"{topic_prefix}/{pump_id}/frequency/state",
-                "min": pump.config.frequency_min,
-                "max": pump.config.frequency_max,
-                "step": 1,
-                "unit_of_measurement": "s",
-                "icon": "mdi:timer",
-                "device": device_info,
-                "unique_id": f"jebao_{pump_id}_frequency",
-            }
-        )
-        
-        # Frequency sensor (for statistics/graphs)
-        self._publish_discovery_entity(
-            discovery_prefix, "sensor", pump_id, "frequency_sensor",
-            {
-                "name": "Frequency Level",
-                "state_topic": f"{topic_prefix}/{pump_id}/frequency/state",
-                "unit_of_measurement": "s",
-                "icon": "mdi:timer",
-                "device": device_info,
-                "unique_id": f"jebao_{pump_id}_frequency_sensor",
-                "state_class": "measurement",  # Enables long-term statistics
-            }
-        )
+        # Frequency number and sensor (DMP only)
+        if pump.config.pump_type == PUMP_TYPE_DMP:
+            self._publish_discovery_entity(
+                discovery_prefix, "number", pump_id, "frequency",
+                {
+                    "name": "Frequency",
+                    "command_topic": f"{topic_prefix}/{pump_id}/frequency/set",
+                    "state_topic": f"{topic_prefix}/{pump_id}/frequency/state",
+                    "min": pump.config.frequency_min,
+                    "max": pump.config.frequency_max,
+                    "step": 1,
+                    "unit_of_measurement": "s",
+                    "icon": "mdi:timer",
+                    "device": device_info,
+                    "unique_id": f"jebao_{pump_id}_frequency",
+                }
+            )
+            
+            self._publish_discovery_entity(
+                discovery_prefix, "sensor", pump_id, "frequency_sensor",
+                {
+                    "name": "Frequency Level",
+                    "state_topic": f"{topic_prefix}/{pump_id}/frequency/state",
+                    "unit_of_measurement": "s",
+                    "icon": "mdi:timer",
+                    "device": device_info,
+                    "unique_id": f"jebao_{pump_id}_frequency_sensor",
+                    "state_class": "measurement",  # Enables long-term statistics
+                }
+            )
         
         # Runtime counter (tracks total ON time)
         self._publish_discovery_entity(
@@ -630,19 +1047,20 @@ class MQTTBridge:
             }
         )
         
-        # Mode select
-        self._publish_discovery_entity(
-            discovery_prefix, "select", pump_id, "mode",
-            {
-                "name": "Mode",
-                "command_topic": f"{topic_prefix}/{pump_id}/mode/set",
-                "state_topic": f"{topic_prefix}/{pump_id}/mode/state",
-                "options": list(MODES.values()),
-                "icon": "mdi:waves-arrow-right",
-                "device": device_info,
-                "unique_id": f"jebao_{pump_id}_mode",
-            }
-        )
+        # Mode select (DMP only)
+        if pump.config.pump_type == PUMP_TYPE_DMP:
+            self._publish_discovery_entity(
+                discovery_prefix, "select", pump_id, "mode",
+                {
+                    "name": "Mode",
+                    "command_topic": f"{topic_prefix}/{pump_id}/mode/set",
+                    "state_topic": f"{topic_prefix}/{pump_id}/mode/state",
+                    "options": list(MODES.values()),
+                    "icon": "mdi:waves-arrow-right",
+                    "device": device_info,
+                    "unique_id": f"jebao_{pump_id}_mode",
+                }
+            )
         
         # Connected binary sensor
         self._publish_discovery_entity(
@@ -698,31 +1116,45 @@ class MQTTBridge:
         if pump.state.power and pump.state.power_on_time > 0:
             runtime += (time.time() - pump.state.power_on_time) / 3600
         
+        # Power state (all pumps)
         self.mqtt_client.publish(
             f"{prefix}/{pump_id}/power/state",
             "ON" if pump.state.power else "OFF",
             retain=True
         )
-        self.mqtt_client.publish(
-            f"{prefix}/{pump_id}/feed/state",
-            "ON" if pump.state.feed else "OFF",
-            retain=True
-        )
+        
+        # Feed state (both DMP and MDP)
+        if pump.config.pump_type in [PUMP_TYPE_DMP, PUMP_TYPE_MDP]:
+            self.mqtt_client.publish(
+                f"{prefix}/{pump_id}/feed/state",
+                "ON" if pump.state.feed else "OFF",
+                retain=True
+            )
+        
+        # Flow/Speed state (all pumps)
         self.mqtt_client.publish(
             f"{prefix}/{pump_id}/flow/state",
             str(pump.state.flow),
             retain=True
         )
-        self.mqtt_client.publish(
-            f"{prefix}/{pump_id}/frequency/state",
-            str(pump.state.frequency),
-            retain=True
-        )
-        self.mqtt_client.publish(
-            f"{prefix}/{pump_id}/mode/state",
-            MODES.get(pump.state.mode, "Unknown"),
-            retain=True
-        )
+        
+        # Frequency state (DMP only)
+        if pump.config.pump_type == PUMP_TYPE_DMP:
+            self.mqtt_client.publish(
+                f"{prefix}/{pump_id}/frequency/state",
+                str(pump.state.frequency),
+                retain=True
+            )
+        
+        # Mode state (DMP only)
+        if pump.config.pump_type == PUMP_TYPE_DMP:
+            self.mqtt_client.publish(
+                f"{prefix}/{pump_id}/mode/state",
+                MODES.get(pump.state.mode, "Unknown"),
+                retain=True
+            )
+        
+        # Runtime state (all pumps)
         self.mqtt_client.publish(
             f"{prefix}/{pump_id}/runtime/state",
             f"{runtime:.2f}",

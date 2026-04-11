@@ -1,15 +1,15 @@
 # Jebao Pump MQTT Bridge
 
-A Python service that connects Jebao DMP series aquarium wavemaker pumps to Home Assistant via MQTT.
+A Python service that connects Jebao DMP and MDP series aquarium pumps to Home Assistant via MQTT.
 
 ## Compatibility
 
-| Series | Model | Tested | Notes |
-|--------|-------|--------|-------|
-| DMP | DMP-40 | ✅ | Fully tested |
-| DMP | DMP-65 | ✅ | Fully tested |
-| MDP | MDP-5000 | ❓ | Should work, untested |
-| SLW | SLW-20 | ❓ | Should work, untested |
+| Series | Model | Tested | Control | Notes |
+|--------|-------|--------|---------|-------|
+| DMP | DMP-40 | ✅ | Full | Power, flow, frequency, mode, feed |
+| DMP | DMP-65 | ✅ | Full | Power, flow, frequency, mode, feed |
+| MDP | MDP-5000 | ✅ | Read-only | Status monitoring (power, speed, feed, faults) |
+| SLW | SLW-20 | ❓ | Unknown | Should work, untested |
 
 ## Features
 
@@ -311,8 +311,14 @@ mqtt:
   password: mqtt_pass
 
 pumps:
-  - name: "Wavemaker 1"
-    mac: "AA:BB:CC:DD:EE:FF"  # Your pump's MAC
+  # DMP wavemaker (default type)
+  - name: "Wavemaker 1" 
+    mac: "AA:BB:CC:DD:EE:FF"
+    
+  # MDP return pump (different protocol)
+  - name: "Return Pump"
+    mac: "BB:CC:DD:EE:FF:AA"
+    pump_type: MDP  # Specify MDP protocol
 ```
 
 ### 4. Test Run
@@ -357,7 +363,7 @@ Once the bridge is running, the pump(s) will automatically appear in Home Assist
 
 ### Entities Created
 
-For each pump, you'll get:
+**DMP Wavemakers (full control):**
 
 | Entity | Type | Description |
 |--------|------|-------------|
@@ -367,6 +373,16 @@ For each pump, you'll get:
 | `number.wavemaker_1_frequency` | Number | Wave frequency 5-20s |
 | `select.wavemaker_1_mode` | Select | Wave mode |
 | `binary_sensor.wavemaker_1_connected` | Binary Sensor | BLE connection status |
+
+**MDP Return Pumps (read-only):**
+
+| Entity | Type | Description |
+|--------|------|-------------|
+| `binary_sensor.return_pump_power` | Binary Sensor | Pump on/off status |
+| `binary_sensor.return_pump_feed_mode` | Binary Sensor | Feed mode active |
+| `sensor.return_pump_speed_level` | Sensor | Current speed 0-100% |
+| `sensor.return_pump_runtime_today` | Sensor | Hours running today |
+| `binary_sensor.return_pump_connected` | Binary Sensor | BLE connection status |
 
 ### Example Automations
 
@@ -404,14 +420,50 @@ Add more pumps to `config.yaml`:
 
 ```yaml
 pumps:
+  # DMP wavemakers (full control: modes, frequency, feed mode)
   - name: "Left Wavemaker"
     mac: "AA:BB:CC:DD:EE:01"
+    pump_type: DMP
     
-  - name: "Right Wavemaker"
+  - name: "Right Wavemaker" 
     mac: "AA:BB:CC:DD:EE:02"
+    pump_type: DMP
     
+  # MDP return pump (read-only status monitoring)
   - name: "Return Pump"
     mac: "AA:BB:CC:DD:EE:03"
+    pump_type: MDP
+    model: "MDP-5000"
+    control_mode: read_only  # Status monitoring only (default for MDP)
+    poll_interval: 30        # Poll status every 30 seconds
+```
+
+## Pump Types
+
+### DMP Series (Wavemakers)
+- **Features**: Wave modes, frequency control, feed mode, flow control
+- **Protocol**: Traditional Jebao attribute-based commands  
+- **Examples**: DMP-40, DMP-65
+- **Home Assistant entities**: Power, Feed Mode, Flow, Frequency, Mode Select
+
+### MDP Series (Return Pumps)  
+- **Features**: Status monitoring — power, speed, feed mode, fault detection
+- **Control**: Read-only by default (write protocol is a work-in-progress)
+- **Protocol**: Gizwits IoT platform protocol (BLE)
+- **Examples**: MDP-5000
+- **Home Assistant entities**: Power (sensor), Speed (sensor), Feed Mode (sensor), Connected, Runtime
+- **Polling**: Status polled every 30s (configurable via `poll_interval`)
+
+Configure pump type in config.yaml:
+```yaml
+pumps:
+  - name: "Wavemaker"
+    pump_type: DMP          # Default, can be omitted
+    
+  - name: "Return Pump" 
+    pump_type: MDP          # Required for MDP pumps
+    control_mode: read_only # read_only (default) or full
+    poll_interval: 30       # Status poll interval in seconds
 ```
 
 ## Troubleshooting
@@ -512,6 +564,8 @@ jebao-mqtt/
 ├── config.yaml             # Your local config (edit this)
 ├── requirements.txt        # Python dependencies
 ├── jebao-mqtt.service      # Systemd service
+├── docs/                   # Protocol research & documentation
+├── tests/                  # BLE protocol test scripts
 ├── scripts/
 │   ├── setup.sh            # Initial Pi setup
 │   ├── update.sh           # Auto-update script
@@ -616,7 +670,8 @@ The included workflow runs linting on every push. To enable auto-deploy via SSH:
 
 ## Protocol Details
 
-See `jebao_protocol_final.md` for the complete reverse-engineered BLE protocol documentation.
+- **DMP protocol**: Traditional Jebao attribute-based BLE commands (fully reverse-engineered)
+- **MDP protocol**: Gizwits IoT platform BLE protocol. See `docs/MDP_PROTOCOL_RESEARCH.md` for the complete reverse-engineering notes including the data point schema from APK decompilation.
 
 ## License
 

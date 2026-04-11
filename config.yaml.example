@@ -28,12 +28,18 @@ pumps:
     # frequency_min: 5            # Minimum frequency in seconds
     # frequency_max: 20           # Maximum frequency in seconds
 
-  # Example: Add a second pump
+  # Example: Add a second DMP wavemaker
   # - name: "Wavemaker 2"
   #   mac: "YY:YY:YY:YY:YY:YY"
+  #   pump_type: DMP
 
-  # Example: Different pump model with different limits
+  # Example: MDP return pump (different protocol)
   # - name: "Return Pump"
   #   mac: "ZZ:ZZ:ZZ:ZZ:ZZ:ZZ"
-  #   flow_min: 20
+  #   pump_type: MDP           # Use MDP protocol
+  #   model: "MDP-5000"        # Optional: specific model
+  #   flow_min: 30             # Speed range for MDP pumps
   #   flow_max: 100
+  #   control_mode: read_only  # read_only = status monitoring only
+  #                            # full = status + control (default for DMP)
+  #   poll_interval: 30        # Status poll interval in seconds (MDP only, default: 30)
