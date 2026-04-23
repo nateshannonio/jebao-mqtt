@@ -282,6 +282,9 @@ class JebaoPump:
                 self.authenticated = True
                 self.state.connected = True
                 self.state_callback(self)
+                # Start DMP status polling
+                if self._poll_task is None or self._poll_task.done():
+                    self._poll_task = asyncio.create_task(self._dmp_poll_loop())
             else:
                 logger.warning(f"[{self.config.name}] Login failed")
 
@@ -292,6 +295,12 @@ class JebaoPump:
                     self._update_state_dmp(p0[7], p0[8], p0[9], p0[10])
 
         elif cmd == 0x0094:
+            # Check if this is a read response (action 0x13) with state data
+            if len(data) >= 23:
+                p0 = data[12:]
+                if len(p0) >= 11 and p0[0] == 0x13:
+                    self._update_state_dmp(p0[7], p0[8], p0[9], p0[10])
+                    return
             logger.debug(f"[{self.config.name}] Command acknowledged")
 
     def _handle_mdp_packet(self, data: bytes):
@@ -463,6 +472,39 @@ class JebaoPump:
         except BleakError as e:
             logger.debug(f"[{self.config.name}] Status request failed: {e}")
     
+    async def _dmp_poll_loop(self):
+        """Periodically poll DMP pump status via BLE"""
+        interval = self.config.poll_interval
+        logger.info(f"[{self.config.name}] Starting DMP status polling (every {interval}s)")
+        while self._running and self.authenticated:
+            try:
+                await self._dmp_request_status()
+            except Exception as e:
+                logger.debug(f"[{self.config.name}] DMP poll error: {e}")
+            await asyncio.sleep(interval)
+        logger.debug(f"[{self.config.name}] DMP poll loop ended")
+
+    async def _dmp_request_status(self):
+        """Send status read requests for each DMP attribute"""
+        if not self.authenticated or not self.client or not self.client.is_connected:
+            return
+        # Request each attribute individually using read action (0x12)
+        for attr in [ATTR_POWER, ATTR_FEED, ATTR_MODE, ATTR_FLOW, ATTR_FREQUENCY]:
+            p0 = bytearray(11)
+            p0[0] = 0x12  # Read action
+            p0[7] = attr[0]  # type
+            p0[8] = attr[1]  # attr_hi
+            p0[9] = attr[2]  # attr_lo
+            payload = self.command_sn.to_bytes(4, 'big') + bytes(p0)
+            packet = self._make_packet(CMD_CONTROL, payload)
+            self.command_sn += 1
+            try:
+                await self.client.write_gatt_char(CHAR_UUID, packet, response=False)
+                await asyncio.sleep(0.3)  # Small delay between requests
+            except BleakError as e:
+                logger.debug(f"[{self.config.name}] DMP status request failed: {e}")
+                break
+
     async def _send_login(self):
         """Send login packet with passcode"""
         if self.client and self.client.is_connected:
