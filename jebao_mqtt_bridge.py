@@ -622,13 +622,15 @@ class JebaoPump:
             logger.error(f"[{self.config.name}] Error in state callback: {e}")
         
         # Schedule reconnect in the event loop
-        if self._loop is not None:
+        if self._loop is not None and self._running:
             try:
-                # Check if there's already a reconnect task running
-                if self._reconnect_task is None or self._reconnect_task.done():
-                    self._reconnect_task = asyncio.run_coroutine_threadsafe(
-                        self._reconnect_loop(), self._loop
-                    )
+                # Cancel any existing reconnect task that may have exited
+                # after a brief successful connection
+                if self._reconnect_task is not None and not self._reconnect_task.done():
+                    self._reconnect_task.cancel()
+                self._reconnect_task = asyncio.run_coroutine_threadsafe(
+                    self._reconnect_loop(), self._loop
+                )
             except Exception as e:
                 logger.error(f"[{self.config.name}] Failed to schedule reconnect: {e}")
     
