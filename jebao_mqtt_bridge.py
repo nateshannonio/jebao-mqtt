@@ -598,12 +598,12 @@ class JebaoPump:
                 if "Bad file descriptor" in str(e) or "EOFError" in str(type(e).__mro__):
                     logger.critical(f"[{self.config.name}] D-Bus connection broken - exiting for systemd restart")
                     os._exit(1)
-                logger.error(f"[{self.config.name}] Unexpected error during connect: {e}")
+                logger.error(f"[{self.config.name}] Unexpected error during connect: {type(e).__name__}: {e}")
                 await self._cleanup_connection()
                 return False
     
     async def _cleanup_connection(self):
-        """Clean up connection state"""
+        """Clean up connection state and give BlueZ time to release resources"""
         self.authenticated = False
         self.state.connected = False
         if self.client:
@@ -612,6 +612,7 @@ class JebaoPump:
             except Exception:
                 pass
             self.client = None
+        await asyncio.sleep(2)  # Give BlueZ time to clean up
     
     def _on_disconnect(self, client):
         """Handle disconnection - called from BLE callback"""
@@ -649,17 +650,15 @@ class JebaoPump:
     
     async def _reconnect_loop(self):
         """Attempt to reconnect with backoff"""
-        delay = 5
+        delay = 10
         max_delay = 300  # Max 5 minutes between attempts
         max_attempts = 0  # 0 = infinite
         attempts = 0
-        
+
         # Stagger reconnection attempts for multiple pumps to avoid BLE adapter contention
-        # Each pump waits an additional 2 seconds based on its index
-        stagger_delay = self._pump_index * 2
-        if stagger_delay > 0:
-            logger.info(f"[{self.config.name}] Staggering reconnect by {stagger_delay}s")
-            await asyncio.sleep(stagger_delay)
+        stagger_delay = self._pump_index * 8 + random.uniform(2, 5)
+        logger.info(f"[{self.config.name}] Staggering reconnect by {stagger_delay:.0f}s")
+        await asyncio.sleep(stagger_delay)
         
         while not self.authenticated:
             attempts += 1
@@ -1263,11 +1262,16 @@ class MQTTBridge:
             self.pumps[pc.id] = pump
             logger.info(f"Configured pump: {pc.name} ({pc.mac})")
         
-        # Connect to all pumps (staggered to avoid BLE contention)
+        # Connect to all pumps sequentially to avoid BLE adapter contention
         for index, pump in enumerate(self.pumps.values()):
             if index > 0:
-                await asyncio.sleep(2)  # 2 second delay between initial connections
-            asyncio.create_task(pump.connect())
+                await asyncio.sleep(8)
+            try:
+                await asyncio.wait_for(pump.connect(), timeout=30)
+            except asyncio.TimeoutError:
+                logger.warning(f"[{pump.config.name}] Initial connection timed out, will retry via reconnect loop")
+            except Exception as e:
+                logger.error(f"[{pump.config.name}] Initial connection failed: {e}")
         
         # Start periodic state publisher for better graphs
         asyncio.create_task(self._periodic_state_publisher())
