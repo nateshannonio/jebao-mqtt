@@ -574,6 +574,7 @@ class JebaoPump:
                 try:
                     stale = BleakClient(self.config.mac)
                     await stale.disconnect()
+                    await asyncio.sleep(3)  # Give BlueZ time to fully release the device
                 except Exception:
                     pass
 
