@@ -1293,7 +1293,7 @@ class MQTTBridge:
                 await asyncio.sleep(8)
             connected = False
             try:
-                connected = await asyncio.wait_for(pump.connect(), timeout=30)
+                connected = await asyncio.wait_for(pump.connect(), timeout=60)
             except (asyncio.TimeoutError, Exception) as e:
                 msg = "timed out" if isinstance(e, asyncio.TimeoutError) else str(e)
                 logger.warning(f"[{pump.config.name}] Initial connection failed ({msg})")
