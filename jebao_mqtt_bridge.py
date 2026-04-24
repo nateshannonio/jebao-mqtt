@@ -1266,11 +1266,14 @@ class MQTTBridge:
         for index, pump in enumerate(self.pumps.values()):
             if index > 0:
                 await asyncio.sleep(8)
+            connected = False
             try:
-                await asyncio.wait_for(pump.connect(), timeout=30)
+                connected = await asyncio.wait_for(pump.connect(), timeout=30)
             except (asyncio.TimeoutError, Exception) as e:
                 msg = "timed out" if isinstance(e, asyncio.TimeoutError) else str(e)
-                logger.warning(f"[{pump.config.name}] Initial connection failed ({msg}), scheduling reconnect")
+                logger.warning(f"[{pump.config.name}] Initial connection failed ({msg})")
+            if not connected:
+                logger.info(f"[{pump.config.name}] Scheduling reconnect")
                 await pump._cleanup_connection()
                 pump._loop = asyncio.get_running_loop()
                 pump._reconnect_task = asyncio.run_coroutine_threadsafe(
