@@ -615,6 +615,9 @@ class JebaoPump:
     
     def _on_disconnect(self, client):
         """Handle disconnection - called from BLE callback"""
+        # Debounce: ignore if we already know we're disconnected
+        if not self.authenticated and not self.state.connected:
+            return
         logger.warning(f"[{self.config.name}] Disconnected")
         self.authenticated = False
         self.state.connected = False
