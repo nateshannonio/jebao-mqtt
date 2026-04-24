@@ -631,13 +631,16 @@ class JebaoPump:
         # Schedule reconnect in the event loop
         if self._loop is not None and self._running:
             try:
-                # Cancel any existing reconnect task that may have exited
-                # after a brief successful connection
-                if self._reconnect_task is not None and not self._reconnect_task.done():
-                    self._reconnect_task.cancel()
-                self._reconnect_task = asyncio.run_coroutine_threadsafe(
-                    self._reconnect_loop(), self._loop
-                )
+                # Only schedule if no reconnect task is active
+                # The reconnect loop checks self.authenticated, so if we
+                # reconnected briefly and disconnected again, the still-running
+                # loop will see authenticated=False and continue retrying
+                task_running = (self._reconnect_task is not None
+                               and not self._reconnect_task.done())
+                if not task_running:
+                    self._reconnect_task = asyncio.run_coroutine_threadsafe(
+                        self._reconnect_loop(), self._loop
+                    )
             except Exception as e:
                 logger.error(f"[{self.config.name}] Failed to schedule reconnect: {e}")
     
@@ -671,15 +674,22 @@ class JebaoPump:
             
             try:
                 if await self.connect():
-                    logger.info(f"[{self.config.name}] Reconnection successful")
-                    break
+                    # Wait briefly and verify connection held before declaring success
+                    await asyncio.sleep(5)
+                    if self.authenticated:
+                        logger.info(f"[{self.config.name}] Reconnection successful")
+                        break
+                    else:
+                        logger.warning(f"[{self.config.name}] Connection lost shortly after reconnect, retrying...")
+                        delay = 5  # Reset backoff on brief connections
+                        continue
             except Exception as e:
                 logger.error(f"[{self.config.name}] Reconnection attempt failed: {e}")
-            
+
             # Exponential backoff with jitter to prevent synchronized retries
             jitter = random.uniform(0, delay * 0.1)  # Up to 10% jitter
             delay = min(delay * 2 + jitter, max_delay)
-        
+
         logger.debug(f"[{self.config.name}] Reconnect loop ended")
     
     async def disconnect(self):
