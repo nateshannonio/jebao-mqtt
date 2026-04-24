@@ -561,12 +561,19 @@ class JebaoPump:
                 
             try:
                 logger.info(f"[{self.config.name}] Connecting to {self.config.mac}...")
-                
+
+                # Clean up any stale BlueZ state from previous connection
+                if self.client:
+                    try:
+                        await self.client.disconnect()
+                    except Exception:
+                        pass
+
                 self.client = BleakClient(
                     self.config.mac,
                     disconnected_callback=self._on_disconnect
                 )
-                
+
                 await self.client.connect()
                 logger.info(f"[{self.config.name}] Connected")
                 
