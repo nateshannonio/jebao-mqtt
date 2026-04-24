@@ -114,7 +114,7 @@ class PumpConfig:
     frequency_max: int = 20
     model: str = ""  # e.g., "DMP-65", "MDP-5000"
     control_mode: str = ""  # "read_only" or "full" (default depends on pump_type)
-    poll_interval: int = 30  # Status poll interval in seconds (MDP only)
+    poll_interval: int = 60  # Status poll interval in seconds
 
     def __post_init__(self):
         if not self.id:
@@ -510,7 +510,7 @@ class JebaoPump:
             self.command_sn += 1
             try:
                 await self.client.write_gatt_char(CHAR_UUID, packet, response=False)
-                await asyncio.sleep(0.3)  # Small delay between requests
+                await asyncio.sleep(1)  # Delay between requests to avoid overwhelming the pump
             except BleakError as e:
                 logger.debug(f"[{self.config.name}] DMP status request failed: {e}")
                 break
