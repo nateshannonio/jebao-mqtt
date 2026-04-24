@@ -568,6 +568,14 @@ class JebaoPump:
                         await self.client.disconnect()
                     except Exception:
                         pass
+                    self.client = None
+
+                # Force-disconnect via a throwaway client to clear InProgress state
+                try:
+                    stale = BleakClient(self.config.mac)
+                    await stale.disconnect()
+                except Exception:
+                    pass
 
                 self.client = BleakClient(
                     self.config.mac,
