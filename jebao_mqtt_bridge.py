@@ -147,7 +147,16 @@ class PumpConfig:
 
 class JebaoPump:
     """Handles BLE communication with a single Jebao pump"""
-    
+
+    # Shared lock across all pump instances - only one BLE connection attempt at a time
+    _ble_adapter_lock: Optional[asyncio.Lock] = None
+
+    @classmethod
+    def get_ble_lock(cls) -> asyncio.Lock:
+        if cls._ble_adapter_lock is None:
+            cls._ble_adapter_lock = asyncio.Lock()
+        return cls._ble_adapter_lock
+
     # MDP status response layout (from APK product config schema)
     MDP_P0_START = 12        # P0 starts at byte 12 of reassembled packet
     MDP_DEVDATA_START = 25   # Device data starts at P0[25] (after product key prefix)
@@ -551,8 +560,8 @@ class JebaoPump:
             return False
     
     async def connect(self):
-        """Connect to the pump"""
-        async with self._connect_lock:
+        """Connect to the pump (serialized across all pumps via shared BLE lock)"""
+        async with JebaoPump.get_ble_lock():
             if self.client and self.client.is_connected:
                 return True
             
