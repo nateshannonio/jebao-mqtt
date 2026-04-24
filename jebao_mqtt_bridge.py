@@ -15,6 +15,7 @@ import asyncio
 import argparse
 import json
 import logging
+import os
 import random
 import signal
 import sys
@@ -590,7 +591,13 @@ class JebaoPump:
                 logger.error(f"[{self.config.name}] Connection failed: {e}")
                 await self._cleanup_connection()
                 return False
+            except EOFError:
+                logger.critical(f"[{self.config.name}] D-Bus connection lost (BlueZ crashed?) - exiting for systemd restart")
+                os._exit(1)
             except Exception as e:
+                if "Bad file descriptor" in str(e) or "EOFError" in str(type(e).__mro__):
+                    logger.critical(f"[{self.config.name}] D-Bus connection broken - exiting for systemd restart")
+                    os._exit(1)
                 logger.error(f"[{self.config.name}] Unexpected error during connect: {e}")
                 await self._cleanup_connection()
                 return False
