@@ -756,13 +756,18 @@ class JebaoPump:
             if self._is_read_only():
                 logger.warning(f"[{self.config.name}] Control not available (read_only mode)")
                 return False
-            # TODO: MDP write protocol not yet implemented
             if on:
                 return await self._start_feed_mode_mdp()
             else:
                 return await self._end_feed_mode_mdp()
         else:
-            return await self._send_command(ATTR_FEED, 1 if on else 0)
+            # DMP: feed flag alone doesn't stop the pump, must also power off
+            if on:
+                await self._send_command(ATTR_FEED, 1)
+                return await self._send_command(ATTR_POWER, 0)
+            else:
+                await self._send_command(ATTR_FEED, 0)
+                return await self._send_command(ATTR_POWER, 1)
 
     async def set_flow(self, percent: int):
         percent = max(self.config.flow_min, min(self.config.flow_max, percent))
