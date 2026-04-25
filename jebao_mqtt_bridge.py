@@ -761,13 +761,46 @@ class JebaoPump:
             else:
                 return await self._end_feed_mode_mdp()
         else:
-            # DMP: feed flag alone doesn't stop the pump, must also power off
             if on:
-                await self._send_command(ATTR_FEED, 1)
-                return await self._send_command(ATTR_POWER, 0)
+                return await self._start_feed_mode_dmp()
             else:
-                await self._send_command(ATTR_FEED, 0)
-                return await self._send_command(ATTR_POWER, 1)
+                return await self._end_feed_mode_dmp()
+
+    async def _start_feed_mode_dmp(self) -> bool:
+        """Start DMP feed mode - power off pump with auto-resume timer"""
+        feed_duration = self.config.feed_time if hasattr(self.config, 'feed_time') else 600
+        logger.info(f"[{self.config.name}] Starting feed mode ({feed_duration // 60} min timer)")
+        await self._send_command(ATTR_FEED, 1)
+        success = await self._send_command(ATTR_POWER, 0)
+        if success:
+            self.state.feed = True
+            self.state.feed_end_time = time.time() + feed_duration
+            asyncio.create_task(self._feed_timer_dmp())
+        return success
+
+    async def _end_feed_mode_dmp(self) -> bool:
+        """End DMP feed mode - resume pump"""
+        logger.info(f"[{self.config.name}] Ending feed mode")
+        self.state.feed_end_time = 0.0
+        await self._send_command(ATTR_FEED, 0)
+        success = await self._send_command(ATTR_POWER, 1)
+        if success:
+            self.state.feed = False
+        return success
+
+    async def _feed_timer_dmp(self):
+        """Background timer for DMP feed mode auto-resume"""
+        try:
+            while self.state.feed_end_time > time.time() and self.state.feed:
+                remaining = int(self.state.feed_end_time - time.time())
+                if remaining > 0 and remaining % 60 == 0:
+                    logger.info(f"[{self.config.name}] Feed mode: {remaining // 60} min remaining")
+                await asyncio.sleep(1.0)
+            if self.state.feed:
+                logger.info(f"[{self.config.name}] Feed timer expired, resuming pump")
+                await self._end_feed_mode_dmp()
+        except Exception as e:
+            logger.error(f"[{self.config.name}] Feed timer error: {e}")
 
     async def set_flow(self, percent: int):
         percent = max(self.config.flow_min, min(self.config.flow_max, percent))
