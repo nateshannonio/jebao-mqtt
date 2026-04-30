@@ -178,6 +178,10 @@ class JebaoPump:
         self._loop: Optional[asyncio.AbstractEventLoop] = None  # Event loop reference
         self._pump_index = pump_index  # Used to stagger reconnection attempts
         self._poll_task = None  # MDP status polling task
+        # Commands queued while disconnected; replayed on next successful auth.
+        # Dict so a later write to the same attribute supersedes an earlier one
+        # (e.g. feed-on then feed-off while offline collapses to feed-off).
+        self._pending_commands: dict = {}
         # MDP packet reassembly (BLE notifications are fragmented at 20-byte MTU)
         self._reassemble_buffer = bytearray()
         self._reassemble_expected = 0
@@ -292,6 +296,7 @@ class JebaoPump:
                 self.authenticated = True
                 self.state.connected = True
                 self.state_callback(self)
+                asyncio.create_task(self._flush_pending_commands())
                 # Start DMP status polling
                 if self._poll_task is None or self._poll_task.done():
                     self._poll_task = asyncio.create_task(self._dmp_poll_loop())
@@ -331,6 +336,7 @@ class JebaoPump:
                 self.authenticated = True
                 self.state.connected = True
                 self.state_callback(self)
+                asyncio.create_task(self._flush_pending_commands())
                 # Start MDP status polling
                 if self._poll_task is None or self._poll_task.done():
                     self._poll_task = asyncio.create_task(self._mdp_poll_loop())
@@ -522,23 +528,36 @@ class JebaoPump:
             await self.client.write_gatt_char(CHAR_UUID, packet, response=False)
     
     async def _send_command(self, attr: tuple, value: int):
-        """Send a control command (DMP format)"""
+        """Send a control command (DMP format), queuing if not connected"""
         if not self.authenticated or not self.client or not self.client.is_connected:
-            logger.warning(f"[{self.config.name}] Cannot send - not connected")
-            return False
-            
+            logger.info(f"[{self.config.name}] Queuing command {attr}={value} (not connected)")
+            self._pending_commands[attr] = value
+            return True
+
         p0 = self._make_write_p0(attr, value)
         payload = self.command_sn.to_bytes(4, 'big') + p0
         packet = self._make_packet(CMD_CONTROL, payload)
-        
+
         self.command_sn += 1
-        
+
         try:
             await self.client.write_gatt_char(CHAR_UUID, packet, response=False)
             return True
         except BleakError as e:
-            logger.error(f"[{self.config.name}] Send failed: {e}")
+            logger.warning(f"[{self.config.name}] Send failed, queuing {attr}={value}: {e}")
+            self._pending_commands[attr] = value
             return False
+
+    async def _flush_pending_commands(self):
+        """Replay any commands queued while disconnected. Called after auth."""
+        if not self._pending_commands:
+            return
+        pending = self._pending_commands
+        self._pending_commands = {}
+        logger.info(f"[{self.config.name}] Flushing {len(pending)} queued command(s)")
+        for attr, value in pending.items():
+            await self._send_command(attr, value)
+            await asyncio.sleep(0.5)
     
     async def _send_command_mdp(self, attrs: dict):
         """Send a control command (MDP Gizwits format)"""
@@ -767,26 +786,26 @@ class JebaoPump:
                 return await self._end_feed_mode_dmp()
 
     async def _start_feed_mode_dmp(self) -> bool:
-        """Start DMP feed mode - power off pump with auto-resume timer"""
+        """Start DMP feed mode - power off pump with auto-resume timer.
+        Commands queue if pump is offline; timer runs regardless so the pump
+        resumes correctly even if it reconnects mid-window."""
         feed_duration = self.config.feed_time if hasattr(self.config, 'feed_time') else 600
         logger.info(f"[{self.config.name}] Starting feed mode ({feed_duration // 60} min timer)")
+        self.state.feed = True
+        self.state.feed_end_time = time.time() + feed_duration
         await self._send_command(ATTR_FEED, 1)
-        success = await self._send_command(ATTR_POWER, 0)
-        if success:
-            self.state.feed = True
-            self.state.feed_end_time = time.time() + feed_duration
-            asyncio.create_task(self._feed_timer_dmp())
-        return success
+        await self._send_command(ATTR_POWER, 0)
+        asyncio.create_task(self._feed_timer_dmp())
+        return True
 
     async def _end_feed_mode_dmp(self) -> bool:
         """End DMP feed mode - resume pump"""
         logger.info(f"[{self.config.name}] Ending feed mode")
+        self.state.feed = False
         self.state.feed_end_time = 0.0
         await self._send_command(ATTR_FEED, 0)
-        success = await self._send_command(ATTR_POWER, 1)
-        if success:
-            self.state.feed = False
-        return success
+        await self._send_command(ATTR_POWER, 1)
+        return True
 
     async def _feed_timer_dmp(self):
         """Background timer for DMP feed mode auto-resume"""
