@@ -694,40 +694,40 @@ class JebaoPump:
     
     async def _reconnect_loop(self):
         """Attempt to reconnect with backoff"""
-        delay = 10
-        max_delay = 300  # Max 5 minutes between attempts
+        delay = 3
+        max_delay = 60  # Max 1 minute between attempts
         max_attempts = 0  # 0 = infinite
         attempts = 0
 
         # Stagger reconnection attempts for multiple pumps to avoid BLE adapter contention
-        stagger_delay = self._pump_index * 8 + random.uniform(2, 5)
+        stagger_delay = self._pump_index * 3 + random.uniform(1, 2)
         logger.info(f"[{self.config.name}] Staggering reconnect by {stagger_delay:.0f}s")
         await asyncio.sleep(stagger_delay)
-        
+
         while not self.authenticated:
             attempts += 1
             if max_attempts > 0 and attempts > max_attempts:
                 logger.error(f"[{self.config.name}] Max reconnection attempts reached")
                 break
-                
+
             logger.info(f"[{self.config.name}] Reconnecting in {delay:.1f}s... (attempt {attempts})")
             await asyncio.sleep(delay)
-            
+
             # Check if we should still be trying
             if not self._running:
                 logger.info(f"[{self.config.name}] Stopping reconnect - bridge shutting down")
                 break
-            
+
             try:
                 if await self.connect():
                     # Wait briefly and verify connection held before declaring success
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(2)
                     if self.authenticated:
                         logger.info(f"[{self.config.name}] Reconnection successful")
                         break
                     else:
                         logger.warning(f"[{self.config.name}] Connection lost shortly after reconnect, retrying...")
-                        delay = 5  # Reset backoff on brief connections
+                        delay = 3  # Reset backoff on brief connections
                         continue
             except Exception as e:
                 logger.error(f"[{self.config.name}] Reconnection attempt failed: {e}")
