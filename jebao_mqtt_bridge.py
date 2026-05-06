@@ -578,22 +578,37 @@ class JebaoPump:
             logger.error(f"[{self.config.name}] Send failed: {e}")
             return False
     
+    # Bound on a single connect attempt. If a BlueZ call wedges, asyncio.wait_for
+    # cancels it so the shared BLE lock is released and other pumps can try.
+    CONNECT_TIMEOUT = 60.0
+
     async def connect(self):
         """Connect to the pump (serialized across all pumps via shared BLE lock)"""
+        try:
+            return await asyncio.wait_for(self._connect_locked(), timeout=self.CONNECT_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.error(
+                f"[{self.config.name}] Connect timed out after {self.CONNECT_TIMEOUT:.0f}s; "
+                f"releasing BLE lock"
+            )
+            await self._cleanup_connection()
+            return False
+
+    async def _connect_locked(self):
         async with JebaoPump.get_ble_lock():
             if self.client and self.client.is_connected:
                 return True
-            
+
             # Store event loop reference for callbacks
             self._loop = asyncio.get_running_loop()
-                
+
             try:
                 logger.info(f"[{self.config.name}] Connecting to {self.config.mac}...")
 
                 # Clean up any stale BlueZ state from previous connection
                 if self.client:
                     try:
-                        await self.client.disconnect()
+                        await asyncio.wait_for(self.client.disconnect(), timeout=5)
                     except Exception:
                         pass
                     self.client = None
@@ -601,7 +616,7 @@ class JebaoPump:
                 # Force-disconnect via a throwaway client to clear InProgress state
                 try:
                     stale = BleakClient(self.config.mac)
-                    await stale.disconnect()
+                    await asyncio.wait_for(stale.disconnect(), timeout=5)
                     await asyncio.sleep(3)  # Give BlueZ time to fully release the device
                 except Exception:
                     pass
