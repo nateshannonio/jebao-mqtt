@@ -50,7 +50,8 @@ CMD_CONTROL = 0x0093
 ATTR_POWER = (0x00, 0x00, 0x01)
 ATTR_FEED = (0x00, 0x00, 0x04)
 ATTR_MODE = (0x00, 0x10, 0x02)
-ATTR_FLOW = (0x00, 0x80, 0x00)
+ATTR_FLOW = (0x00, 0x80, 0x00)         # Flow setpoint (last user-set value)
+ATTR_FLOW_ACTUAL = (0x0c, 0x00, 0x00)  # Flow actual (current, includes schedule overrides)
 ATTR_FREQUENCY = (0x01, 0x00, 0x00)
 
 # MDP Attribute definitions (Gizwits bitmap flags)
@@ -584,8 +585,14 @@ class JebaoPump:
         """Send status read requests for each DMP attribute"""
         if not self.authenticated or not self.client or not self.client.is_connected:
             return
-        # Request each attribute individually using read action (0x12)
-        for attr in [ATTR_POWER, ATTR_FEED, ATTR_MODE, ATTR_FLOW, ATTR_FREQUENCY]:
+        # Request each attribute individually using read action (0x12).
+        # ATTR_FLOW_ACTUAL is requested AFTER ATTR_FLOW so that when both
+        # respond, the actual-value handler runs last and wins — meaning
+        # state.flow reflects what the pump is currently doing (which can
+        # differ from the setpoint when a schedule is overriding).
+        # If 0x0c reads aren't supported by the pump, the read silently
+        # no-ops (BleakError is caught below) and we fall back to setpoint.
+        for attr in [ATTR_POWER, ATTR_FEED, ATTR_MODE, ATTR_FLOW, ATTR_FLOW_ACTUAL, ATTR_FREQUENCY]:
             p0 = bytearray(11)
             p0[0] = 0x12  # Read action
             p0[7] = attr[0]  # type
