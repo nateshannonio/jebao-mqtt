@@ -196,6 +196,26 @@ Read-only MDP support is implemented in `jebao_mqtt_bridge.py`:
 - Publish to MQTT with HA auto-discovery (binary sensors + speed sensor, no controls)
 - Config option `control_mode: read_only` (default for MDP)
 
+## Fault Detection (implemented)
+
+A `Problem` binary sensor (`device_class: problem`) is published for every pump,
+backed by `PumpState.fault` / `fault_reason`.
+
+- **MDP:** `_parse_mdp_status()` reads the fault byte (DPs 59-65) using
+  `MDP_FAULT_BYTE_OFFSET = 301` within device data. **Caveat:** the polled 0x0100
+  response only carries ~174 bytes of device data, which does *not* reach byte 301.
+  The read is length-guarded, so today it normally finds no fault rather than
+  reading out of bounds. Open question: does a fault produce a *longer* status
+  response, or is the fault byte at a different offset in the 174-byte report? Needs
+  capture during an actual fault (or an HCI snoop of the app showing a fault).
+- **DMP:** fault layout is unknown. `_update_state_dmp()` now captures any
+  unrecognized `(type, attr_hi, attr_lo)=value` attribute to
+  `PumpState.last_unknown_code` (published as the `Last Unknown Code` diagnostic
+  sensor) and logs it at WARNING. Previously these were silently dropped. **Next
+  fault to investigate:** check this sensor / the logs for a code that appears when
+  the pump faults — that identifies the DMP fault attribute, which can then set
+  `state.fault` directly.
+
 ## Next Steps for Write Support
 
 1. **Try WiFi protocol** — `tests/test-mdp-wifi.py` can sniff app traffic over TCP (no single-connection limit)

@@ -387,8 +387,97 @@ class TestMQTTBridgeStatePublishing:
         bridge.pumps['test'] = pump
         bridge._publish_state(pump)
         calls = bridge.mqtt_client.publish.call_args_list
-        assert len(calls) == 1
-        assert 'connected/state' in calls[0][0][0]
+        topics = [c[0][0] for c in calls]
+        # Before init we publish only the always-on signals: connectivity + fault.
+        assert any('connected/state' in t for t in topics)
+        assert any('fault/state' in t for t in topics)
+        # But NOT the pump's data values, which we haven't received yet.
+        assert not any('flow/state' in t for t in topics)
+        assert not any('power/state' in t for t in topics)
+        assert not any('mode/state' in t for t in topics)
+
+
+class TestFaultHandling:
+    def _mdp_pump(self):
+        config = PumpConfig(name="MDP", mac="AA:BB:CC:DD:EE:FF", pump_type="MDP")
+        return JebaoPump(config, Mock(), pump_index=0)
+
+    def test_dmp_unknown_attribute_captured(self):
+        pump = JebaoPump(PumpConfig(name="DMP", mac="AA:BB:CC:DD:EE:FF"), Mock())
+        # An attribute the bridge doesn't map (previously silently dropped)
+        pump._update_state_dmp(0x02, 0x00, 0x00, 0x01)
+        assert pump.state.last_unknown_code == "0x020000=0x01"
+        assert pump.state.state_initialized == True
+        pump.state_callback.assert_called()
+
+    def test_dmp_known_attribute_not_flagged_unknown(self):
+        pump = JebaoPump(PumpConfig(name="DMP", mac="AA:BB:CC:DD:EE:FF"), Mock())
+        pump._update_state_dmp(0x00, 0x00, 0x01, 1)  # power on — a known attr
+        assert pump.state.last_unknown_code == ""
+
+    def test_mdp_fault_parsed_when_present(self):
+        pump = self._mdp_pump()
+        # Build a status packet long enough to contain the fault byte
+        dd_offset = pump.MDP_P0_START + pump.MDP_DEVDATA_START  # 37
+        from jebao_mqtt_bridge import MDP_FAULT_BYTE_OFFSET
+        data = bytearray(dd_offset + MDP_FAULT_BYTE_OFFSET + 1)
+        data[dd_offset + 1] = 0x01  # bools: SwitchON
+        data[dd_offset + 2] = 50    # speed
+        data[dd_offset + MDP_FAULT_BYTE_OFFSET] = (1 << 4) | (1 << 5)  # locked rotor + dry
+        pump._parse_mdp_status(bytes(data))
+        assert pump.state.fault == True
+        assert "Locked rotor" in pump.state.fault_reason
+        assert "Running dry (no load)" in pump.state.fault_reason
+
+    def test_mdp_short_packet_no_false_fault(self):
+        pump = self._mdp_pump()
+        # A normal-length (211B) status response is too short to reach the fault byte
+        data = bytearray(211)
+        data[pump.MDP_P0_START + pump.MDP_DEVDATA_START + 1] = 0x01  # SwitchON
+        pump._parse_mdp_status(bytes(data))
+        assert pump.state.fault == False
+        assert pump.state.fault_reason == ""
+
+
+class TestMQTTBridgeFaultEntities:
+    @pytest.fixture
+    def bridge_with_pump(self, tmp_path):
+        import yaml
+        config = {
+            'mqtt': {'host': 'localhost', 'topic_prefix': 'jebao'},
+            'pumps': [{'name': 'Test', 'mac': 'AA:BB:CC:DD:EE:FF'}]
+        }
+        config_file = tmp_path / "config.yaml"
+        with open(config_file, 'w') as f:
+            yaml.dump(config, f)
+        bridge = MQTTBridge(str(config_file))
+        bridge.mqtt_client = MagicMock()
+        bridge.mqtt_client.is_connected.return_value = True
+        pump = JebaoPump(PumpConfig(name="Test", mac="AA:BB:CC:DD:EE:FF"), bridge._on_pump_state_change)
+        bridge.pumps['test'] = pump
+        return bridge, pump
+
+    def test_problem_sensor_discovery(self, bridge_with_pump):
+        bridge, pump = bridge_with_pump
+        bridge._publish_discovery(pump)
+        calls = bridge.mqtt_client.publish.call_args_list
+        fault_call = [c for c in calls if 'fault/config' in c[0][0]][0]
+        config = json.loads(fault_call[0][1])
+        assert config['device_class'] == 'problem'
+        assert config['name'] == 'Problem'
+
+    def test_fault_state_published(self, bridge_with_pump):
+        bridge, pump = bridge_with_pump
+        pump.state.connected = True
+        pump.state.state_initialized = True
+        pump.state.fault = True
+        pump.state.fault_reason = "Locked rotor"
+        bridge._publish_state(pump)
+        calls = bridge.mqtt_client.publish.call_args_list
+        fault_call = [c for c in calls if c[0][0].endswith('fault/state')][0]
+        assert fault_call[0][1] == 'ON'
+        attr_call = [c for c in calls if 'fault/attributes' in c[0][0]][0]
+        assert json.loads(attr_call[0][1])['reason'] == 'Locked rotor'
 
 
 class TestIntegration:

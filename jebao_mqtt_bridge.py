@@ -58,6 +58,22 @@ MDP_ATTR_POWER = 0  # SwitchON - bit 0
 MDP_ATTR_FEED = 1   # Feed mode - bit 1
 MDP_ATTR_SPEED = 5  # Motor_Speed - uint8 value follows flags
 
+# MDP fault flags (data points 59-65). In the full APK attr_vals schema these live
+# in device-data byte 301, bits 0-6. See docs/MDP_PROTOCOL_RESEARCH.md.
+# IMPORTANT: the polled 0x0100 status response only carries ~174 bytes of device
+# data, which does NOT reach byte 301 — so _parse_mdp_status reads this only when a
+# packet is actually long enough to contain it, never out of bounds.
+MDP_FAULT_BYTE_OFFSET = 301  # offset within device data (P0[25:])
+MDP_FAULT_FLAGS = {
+    0: "Overcurrent",
+    1: "Overvoltage",
+    2: "Over-temperature",
+    3: "Undervoltage",
+    4: "Locked rotor",
+    5: "Running dry (no load)",
+    6: "UART fault",
+}
+
 # Mode mappings (BLE value -> Display name) - DMP only
 DMP_MODES = {
     0: "Classic Wave",   # Mode 1 on controller
@@ -99,6 +115,13 @@ class PumpState:
     last_runtime_reset: str = ""  # Date of last reset (YYYY-MM-DD)
     # Track if we've received actual state from pump
     state_initialized: bool = False
+    # Fault / error state (surfaced to HA as a "problem" binary sensor)
+    fault: bool = False
+    fault_reason: str = ""  # human-readable active fault(s), e.g. "Locked rotor"
+    # Discovery aid: last BLE attribute we received but don't understand. The DMP
+    # fault layout hasn't been reverse-engineered, so a mechanical fault may arrive
+    # as an un-mapped attribute — capture it so we can identify the real fault code.
+    last_unknown_code: str = ""
     
 
 @dataclass 
@@ -397,7 +420,23 @@ class JebaoPump:
                 self.state.frequency = value
                 changed = True
                 logger.info(f"[{self.config.name}] Frequency: {value}s")
-        
+
+        else:
+            # Unrecognized attribute. The DMP fault layout isn't reverse-engineered,
+            # so anything we don't understand is captured here — a mechanical fault
+            # (locked rotor, dry run) may surface as one of these. Surfacing it to HA
+            # lets the user spot a recurring code and is how we'll identify the real
+            # fault attribute. See docs/MDP_PROTOCOL_RESEARCH.md.
+            code = f"0x{type_byte:02x}{attr_hi:02x}{attr_lo:02x}=0x{value:02x}"
+            if self.state.last_unknown_code != code:
+                self.state.last_unknown_code = code
+                changed = True
+                logger.warning(
+                    f"[{self.config.name}] Unrecognized DMP attribute {code} "
+                    f"(type={type_byte} hi={attr_hi} lo={attr_lo} val={value}); "
+                    f"possible fault/diagnostic code — please report"
+                )
+
         if changed:
             self.state.state_initialized = True
             self.state_callback(self)
@@ -458,6 +497,33 @@ class JebaoPump:
             self.state.mode = auto_mode
             changed = True
             logger.debug(f"[{self.config.name}] AutoMode: {auto_mode}")
+
+        # Fault flags — guarded: only read if the packet actually reaches the fault
+        # byte (current poll responses are too short, so this normally finds no
+        # fault rather than reading garbage). When a longer packet does carry it,
+        # we'll start reporting real faults without any further code change.
+        fault_names = []
+        if len(devdata) > MDP_FAULT_BYTE_OFFSET:
+            fault_byte = devdata[MDP_FAULT_BYTE_OFFSET]
+            fault_names = [name for bit, name in MDP_FAULT_FLAGS.items()
+                           if fault_byte & (1 << bit)]
+            logger.debug(f"[{self.config.name}] MDP fault byte=0x{fault_byte:02x} {fault_names}")
+        else:
+            logger.debug(
+                f"[{self.config.name}] MDP status {len(data)}B too short for fault byte "
+                f"(devdata {len(devdata)}B, need >{MDP_FAULT_BYTE_OFFSET})"
+            )
+
+        fault_active = bool(fault_names)
+        fault_reason = ", ".join(fault_names)
+        if self.state.fault != fault_active or self.state.fault_reason != fault_reason:
+            self.state.fault = fault_active
+            self.state.fault_reason = fault_reason
+            changed = True
+            if fault_active:
+                logger.warning(f"[{self.config.name}] FAULT: {fault_reason}")
+            else:
+                logger.info(f"[{self.config.name}] Fault cleared")
 
         if changed or not self.state.state_initialized:
             self.state.state_initialized = True
@@ -1235,7 +1301,39 @@ class MQTTBridge:
                 "unique_id": f"jebao_{pump_id}_connected",
             }
         )
-        
+
+        # Problem / fault binary sensor (all pumps). device_class "problem" makes HA
+        # show it red and play nicely with automations/notifications. The active
+        # fault description rides along as a state attribute.
+        self._publish_discovery_entity(
+            discovery_prefix, "binary_sensor", pump_id, "fault",
+            {
+                "name": "Problem",
+                "state_topic": f"{topic_prefix}/{pump_id}/fault/state",
+                "json_attributes_topic": f"{topic_prefix}/{pump_id}/fault/attributes",
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "device_class": "problem",
+                "icon": "mdi:alert",
+                "device": device_info,
+                "unique_id": f"jebao_{pump_id}_fault",
+            }
+        )
+
+        # Diagnostic: last unrecognized BLE attribute. Discovery aid for un-mapped
+        # faults (especially DMP, whose fault layout isn't decoded yet).
+        self._publish_discovery_entity(
+            discovery_prefix, "sensor", pump_id, "diag_code",
+            {
+                "name": "Last Unknown Code",
+                "state_topic": f"{topic_prefix}/{pump_id}/diag_code/state",
+                "icon": "mdi:help-circle-outline",
+                "entity_category": "diagnostic",
+                "device": device_info,
+                "unique_id": f"jebao_{pump_id}_diag_code",
+            }
+        )
+
         logger.info(f"[{pump.config.name}] Published MQTT discovery")
     
     def _publish_discovery_entity(self, discovery_prefix: str, component: str, 
@@ -1259,7 +1357,29 @@ class MQTTBridge:
             "ON" if pump.state.connected else "OFF",
             retain=True
         )
-        
+
+        # Always publish fault state + detail so the "Problem" sensor is a reliable
+        # heads-up (defaults OFF until something actually faults).
+        self.mqtt_client.publish(
+            f"{prefix}/{pump_id}/fault/state",
+            "ON" if pump.state.fault else "OFF",
+            retain=True
+        )
+        self.mqtt_client.publish(
+            f"{prefix}/{pump_id}/fault/attributes",
+            json.dumps({
+                "reason": pump.state.fault_reason,
+                "last_unknown_code": pump.state.last_unknown_code,
+            }),
+            retain=True
+        )
+        if pump.state.last_unknown_code:
+            self.mqtt_client.publish(
+                f"{prefix}/{pump_id}/diag_code/state",
+                pump.state.last_unknown_code,
+                retain=True
+            )
+
         # Don't publish other values until we've received actual state from the pump
         if not pump.state.state_initialized:
             logger.debug(f"[{pump.config.name}] Waiting for initial state from pump")

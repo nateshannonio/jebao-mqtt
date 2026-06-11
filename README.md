@@ -373,6 +373,8 @@ Once the bridge is running, the pump(s) will automatically appear in Home Assist
 | `number.wavemaker_1_frequency` | Number | Wave frequency 5-20s |
 | `select.wavemaker_1_mode` | Select | Wave mode |
 | `binary_sensor.wavemaker_1_connected` | Binary Sensor | BLE connection status |
+| `binary_sensor.wavemaker_1_problem` | Binary Sensor | Fault detected (`device_class: problem`) |
+| `sensor.wavemaker_1_last_unknown_code` | Sensor (diagnostic) | Last un-mapped BLE attribute seen |
 
 **MDP Return Pumps (read-only):**
 
@@ -383,6 +385,17 @@ Once the bridge is running, the pump(s) will automatically appear in Home Assist
 | `sensor.return_pump_speed_level` | Sensor | Current speed 0-100% |
 | `sensor.return_pump_runtime_today` | Sensor | Hours running today |
 | `binary_sensor.return_pump_connected` | Binary Sensor | BLE connection status |
+| `binary_sensor.return_pump_problem` | Binary Sensor | Fault detected (`device_class: problem`) |
+| `sensor.return_pump_last_unknown_code` | Sensor (diagnostic) | Last un-mapped BLE attribute seen |
+
+> **Fault detection status.** The `Problem` sensor reports a fault when the pump
+> transmits one over BLE. For **MDP** pumps the documented fault flags (locked
+> rotor, running dry, over-current/-temp, etc.) are parsed *if present* in the
+> status response. For **DMP** pumps the fault layout hasn't been reverse-engineered
+> yet — until it is, any unrecognized attribute the pump sends is captured to the
+> `Last Unknown Code` diagnostic sensor (and logged at WARNING). If you see a code
+> appear there during a real fault, please report it so DMP fault decoding can be
+> added. See [`docs/MDP_PROTOCOL_RESEARCH.md`](docs/MDP_PROTOCOL_RESEARCH.md).
 
 ### Example Automations
 
@@ -412,6 +425,24 @@ automation:
           entity_id: number.wavemaker_1_flow
         data:
           value: 40
+```
+
+**Wavemaker fault alert (visual heads-up):**
+```yaml
+automation:
+  - alias: "Wavemaker Fault Alert"
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.wavemaker_1_problem
+        to: "on"
+    action:
+      - service: notify.notify
+        data:
+          title: "⚠️ Wavemaker fault"
+          message: >-
+            {{ state_attr('binary_sensor.wavemaker_1_problem', 'reason')
+               or state_attr('binary_sensor.wavemaker_1_problem', 'last_unknown_code')
+               or 'Pump reported a problem' }}
 ```
 
 ## Multiple Pumps
