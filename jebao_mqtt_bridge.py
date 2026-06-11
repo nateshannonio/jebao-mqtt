@@ -1376,19 +1376,23 @@ class MQTTBridge:
             }
         )
 
-        # Diagnostic: last unrecognized BLE attribute. Discovery aid for un-mapped
-        # faults (especially DMP, whose fault layout isn't decoded yet).
-        self._publish_discovery_entity(
-            discovery_prefix, "sensor", pump_id, "diag_code",
-            {
-                "name": "Last Unknown Code",
-                "state_topic": f"{topic_prefix}/{pump_id}/diag_code/state",
-                "icon": "mdi:help-circle-outline",
-                "entity_category": "diagnostic",
-                "device": device_info,
-                "unique_id": f"jebao_{pump_id}_diag_code",
-            }
-        )
+        # Diagnostic: last unrecognized BLE attribute. DMP only — the DMP parser
+        # dispatches by (type, hi, lo) tuple and captures anything it doesn't
+        # recognise into state.last_unknown_code. The MDP parser reads the
+        # response by byte offset (no equivalent capture path), so this entity
+        # would be permanently 'unknown' on MDP pumps. Gate it to DMP.
+        if pump.config.pump_type == PUMP_TYPE_DMP:
+            self._publish_discovery_entity(
+                discovery_prefix, "sensor", pump_id, "diag_code",
+                {
+                    "name": "Last Unknown Code",
+                    "state_topic": f"{topic_prefix}/{pump_id}/diag_code/state",
+                    "icon": "mdi:help-circle-outline",
+                    "entity_category": "diagnostic",
+                    "device": device_info,
+                    "unique_id": f"jebao_{pump_id}_diag_code",
+                }
+            )
 
         logger.info(f"[{pump.config.name}] Published MQTT discovery")
     
