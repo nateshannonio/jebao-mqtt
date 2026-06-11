@@ -410,11 +410,25 @@ class JebaoPump:
                 logger.info(f"[{self.config.name}] Mode: {MODES.get(value, 'Unknown')}")
                 
         elif type_byte == 0x00 and attr_hi == 0x80 and attr_lo == 0x00:
+            # Flow setpoint (what the user set). Schedule overrides come through
+            # the 0x0c variant below — those are what actually reflect the pump's
+            # current behaviour, so prefer them for the headline Flow value.
             if self.state.flow != value:
                 self.state.flow = value
                 changed = True
-                logger.info(f"[{self.config.name}] Flow: {value}%")
-                
+                logger.info(f"[{self.config.name}] Flow: {value}% (setpoint)")
+
+        elif type_byte == 0x0c and attr_hi == 0x00 and attr_lo == 0x00:
+            # Flow actual value — emitted when a schedule changes the pump speed
+            # autonomously (the setpoint variant above stays at whatever the user
+            # last manually set). This is the true "what is the pump doing now"
+            # signal and is what users care about on dashboards.
+            # See docs/APK_REVERSE_ENGINEERING.md for the discovery story.
+            if self.state.flow != value:
+                self.state.flow = value
+                changed = True
+                logger.info(f"[{self.config.name}] Flow: {value}% (auto/schedule)")
+
         elif type_byte == 0x01 and attr_hi == 0x00 and attr_lo == 0x00:
             if self.state.frequency != value:
                 self.state.frequency = value

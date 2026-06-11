@@ -102,20 +102,44 @@ The bridge only recognizes `type=0x00` and `type=0x01`. Anything with a
 different type byte falls through to the "unknown attribute" capture and
 is published to `sensor.<pump>_last_unknown_code`.
 
-### Observed unknown — `0x0c0000=0x28`
+### Observed unknown — `0x0c0000=0x28` — RESOLVED
 
-Captured from `dmp-65-right` on 2026-06-11 00:59:55. Type `0x0c` is an
-entirely new "section" the bridge hasn't decoded — there could be 10+
-more like it. Value 40 with no observable state change at the time.
+Captured from `dmp-65-right` on 2026-06-11 00:59:55, value 40. Confirmed
+by correlation with the device's actual behaviour:
 
-Hypothesis ideas:
-- Motor RPM ÷ 100 (40 → 4000 RPM, plausible)
-- Motor temperature in °C (40°C, plausible for a running pump)
-- A periodic heartbeat or counter
-- Internal status flags
+**`(type=0x0c, hi=0x00, lo=0x00)` = Flow actual-value.**
 
-Need controlled-change observation to confirm — see "Mapping experiment"
-below.
+The DMP-65 had a schedule programmed to change to 40% SINE at that
+exact moment. The bridge was already tracking Flow via
+`(0x00, 0x80, 0x00)` and reading 75% (the user-set value via the app),
+but the 75% never refreshed when the schedule auto-overrode the pump
+to 40% because the schedule path emits the `0x0c` variant instead.
+
+So the protocol distinguishes:
+
+| Wire signal | Meaning |
+|---|---|
+| `(0x00, 0x80, 0x00)` | Flow **setpoint** — what the user set in the app |
+| `(0x0c, 0x00, 0x00)` | Flow **actual** — what the pump is doing right now, including auto/schedule overrides |
+
+The bridge now handles both (commit immediately following this one).
+Logs distinguish them as `Flow: N% (setpoint)` vs `Flow: N% (auto/schedule)`.
+
+### What this implies for other attributes
+
+There's almost certainly an analogous split between **setpoint** and
+**actual** for Mode and likely AutoMode. The schedule the DMP-65 ran on
+included a mode change to SINE, which means somewhere on the wire the
+pump emitted the actual mode — but the bridge didn't log it as unknown,
+suggesting either:
+
+1. It came through `(0x00, 0x10, 0x02)` (the existing Mode path)
+   and was already correct, or
+2. It came through a different `0x0c` variant the bridge silently
+   accepted (less likely given the explicit type-byte gate)
+
+Worth watching for `0x0c?? ??` tuples (other hi/lo combos) the next
+time a scheduled mode change fires.
 
 ## Mapping experiment: `(type, hi, lo)` → Gizwits attribute ID
 
