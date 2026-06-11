@@ -778,6 +778,11 @@ class JebaoPump:
         delay = 3
         max_delay = 60  # Max 1 minute between attempts
         max_attempts = 0  # 0 = infinite
+        # Soft threshold: after this many failed attempts we still keep retrying,
+        # but we set state.fault so HA/dashboards can surface "this pump needs
+        # attention" — distinct from "transiently disconnected." With the default
+        # 3s/exponential backoff this is roughly ~1 minute of sustained failure.
+        fault_threshold = 5
         attempts = 0
 
         # Stagger reconnection attempts for multiple pumps to avoid BLE adapter contention
@@ -790,6 +795,23 @@ class JebaoPump:
             if max_attempts > 0 and attempts > max_attempts:
                 logger.error(f"[{self.config.name}] Max reconnection attempts reached")
                 break
+
+            # Sustained reconnect failure is a fault from the user's perspective —
+            # the pump is unresponsive and needs attention even if it's not
+            # reporting an explicit fault flag. Set once when threshold is crossed
+            # and let the success path clear it.
+            if attempts == fault_threshold and not self.state.fault:
+                self.state.fault = True
+                self.state.fault_reason = f"BLE: {attempts} failed reconnect attempts (pump unresponsive)"
+                logger.warning(
+                    f"[{self.config.name}] Sustained BLE failure ({attempts} attempts); "
+                    f"marking as fault"
+                )
+                if self.state_callback:
+                    try:
+                        self.state_callback(self)
+                    except Exception as e:
+                        logger.error(f"[{self.config.name}] Error in state callback: {e}")
 
             logger.info(f"[{self.config.name}] Reconnecting in {delay:.1f}s... (attempt {attempts})")
             await asyncio.sleep(delay)
@@ -805,6 +827,19 @@ class JebaoPump:
                     await asyncio.sleep(2)
                     if self.authenticated:
                         logger.info(f"[{self.config.name}] Reconnection successful")
+                        # Clear any sustained-failure fault we set during the
+                        # reconnect loop. Pump-reported faults (set from the
+                        # MDP fault byte or a DMP unknown attribute) are left
+                        # alone — they have their own clear path.
+                        if self.state.fault and self.state.fault_reason.startswith("BLE:"):
+                            self.state.fault = False
+                            self.state.fault_reason = ""
+                            logger.info(f"[{self.config.name}] BLE reconnect fault cleared")
+                            if self.state_callback:
+                                try:
+                                    self.state_callback(self)
+                                except Exception as e:
+                                    logger.error(f"[{self.config.name}] Error in state callback: {e}")
                         break
                     else:
                         logger.warning(f"[{self.config.name}] Connection lost shortly after reconnect, retrying...")
