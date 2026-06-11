@@ -347,6 +347,15 @@ class JebaoPump:
         if len(data) < 8:
             return
         cmd = int.from_bytes(data[6:8], 'big')
+        # Diagnostic: log every non-auth packet at INFO before state_initialized.
+        # cmd 0x0007 (passcode) and 0x0009 (login response) are normal at
+        # connect; everything else is the bridge actually hearing from the pump
+        # — narrows whether the right pump's response never arrives vs. arrives
+        # but doesn't reassemble.
+        if not self.state.state_initialized and cmd not in (0x0007, 0x0009):
+            logger.info(
+                f"[{self.config.name}] MDP packet received cmd=0x{cmd:04x} size={len(data)}B"
+            )
         logger.debug(f"[{self.config.name}] MDP cmd=0x{cmd:04x} ({len(data)}B)")
 
         if cmd == 0x0007 and len(data) > 8:
@@ -579,8 +588,15 @@ class JebaoPump:
         self.command_sn += 1
         try:
             await self.client.write_gatt_char(CHAR_UUID, packet, response=False)
+            # Diagnostic: confirm the request actually got dispatched on the
+            # wire. Logged on first request only — we just need to know whether
+            # the loop is firing, not flood the journal every 60s.
+            if not self.state.state_initialized:
+                logger.info(
+                    f"[{self.config.name}] MDP status request sent (cmd 0x93/0x02, sn={self.command_sn - 1})"
+                )
         except BleakError as e:
-            logger.debug(f"[{self.config.name}] Status request failed: {e}")
+            logger.warning(f"[{self.config.name}] Status request failed: {e}")
     
     async def _dmp_poll_loop(self):
         """Periodically poll DMP pump status via BLE"""
