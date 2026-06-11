@@ -100,19 +100,19 @@ class TestJebaoPump:
         assert p0[0] == 0x11
 
     def test_update_state_power(self, pump):
-        pump._update_state(0x00, 0x00, 0x01, 1)
+        pump._update_state_dmp(0x00, 0x00, 0x01, 1)
         assert pump.state.power == True
         assert pump.state.state_initialized == True
 
     def test_update_state_flow(self, pump):
-        pump._update_state(0x00, 0x80, 0x00, 75)
+        pump._update_state_dmp(0x00, 0x80, 0x00, 75)
         assert pump.state.flow == 75
 
     def test_update_state_no_change(self, pump):
         callback = Mock()
         pump.state_callback = callback
         pump.state.flow = 50
-        pump._update_state(0x00, 0x80, 0x00, 50)
+        pump._update_state_dmp(0x00, 0x80, 0x00, 50)
         callback.assert_not_called()
 
 
@@ -122,7 +122,11 @@ class TestJebaoPumpNotificationHandler:
         config = PumpConfig(name="Test", mac="AA:BB:CC:DD:EE:FF")
         return JebaoPump(config, Mock(), pump_index=0)
 
-    def test_login_success(self, pump):
+    @pytest.mark.asyncio
+    async def test_login_success(self, pump):
+        # _handle_packet schedules _flush_pending_commands via
+        # asyncio.create_task on successful login, so the test needs an
+        # event loop available.
         data = bytes([0x00, 0x00, 0x00, 0x03, 0x05, 0x00, 0x00, 0x09, 0x00])
         pump._notification_handler(None, data)
         assert pump.authenticated == True
@@ -168,9 +172,14 @@ class TestJebaoPumpAsync:
 
     @pytest.mark.asyncio
     async def test_send_command_not_authenticated(self, pump):
+        # New behaviour: when not authenticated, _send_command QUEUES the
+        # command for replay after login and returns True (caller treats
+        # 'accepted' = either sent immediately or safely queued). The
+        # queued command must be in _pending_commands.
         pump.authenticated = False
         result = await pump._send_command(ATTR_POWER, 1)
-        assert result == False
+        assert result == True
+        assert pump._pending_commands.get(ATTR_POWER) == 1
 
     @pytest.mark.asyncio
     async def test_send_command_bleak_error(self, pump):
