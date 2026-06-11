@@ -380,6 +380,14 @@ class JebaoPump:
             # Full status response (211 bytes) — parse device data
             self._parse_mdp_status(data)
 
+        elif cmd == 0x0000:
+            # Some MDP pumps reply to the status read with cmd=0x0000 instead
+            # of 0x0100, with a slightly shorter payload (observed 187B vs
+            # the standard 211B). The device-data layout up to offset 37+
+            # appears identical, so route through the same parser.
+            # mdp-5000-right is the first known pump with this variant.
+            self._parse_mdp_status(data)
+
         elif cmd == 0x0062:
             logger.debug(f"[{self.config.name}] MDP device ready notification")
 
