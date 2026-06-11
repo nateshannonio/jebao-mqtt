@@ -467,9 +467,22 @@ class JebaoPump:
         Device data bools byte (from APK product config schema):
           bit 0: SwitchON, bit 1: Mode, bit 2: FeedSwitch, bit 3: TimerON, bits 4-5: AutoMode
         """
+        # Diagnostic: log every status response on the first call after each
+        # (re)connect so we can confirm the response is actually arriving at the
+        # parser. mdp-5000-right was perpetually showing "unknown" in HA — turns
+        # out to help narrow whether the response isn't arriving (no log) vs
+        # arriving but too short to parse (next branch fires).
+        if not self.state.state_initialized:
+            logger.info(
+                f"[{self.config.name}] MDP first poll response received: {len(data)}B"
+            )
+
         dd_offset = self.MDP_P0_START + self.MDP_DEVDATA_START  # 12 + 25 = 37
         if len(data) < dd_offset + 6:
-            logger.debug(f"[{self.config.name}] MDP status too short: {len(data)}B")
+            logger.warning(
+                f"[{self.config.name}] MDP status too short to parse: {len(data)}B "
+                f"(need at least {dd_offset + 6}B)"
+            )
             return
 
         devdata = data[dd_offset:]
