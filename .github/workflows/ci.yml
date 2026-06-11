@@ -39,9 +39,10 @@ jobs:
           
       - name: Check syntax
         run: |
-          python -m py_compile jebao_mqtt_bridge.py
-          python -m py_compile scan.py
-          python -m py_compile mqtt_test.py
+          # Compile every Python source file so new scripts get picked up
+          # automatically without touching the workflow. Excludes .git
+          # (the find scope is the working tree only).
+          find . -type f -name '*.py' -not -path './.git/*' -print -exec python -m py_compile {} +
 
   test:
     runs-on: ubuntu-latest
