@@ -102,6 +102,28 @@ The bridge only recognizes `type=0x00` and `type=0x01`. Anything with a
 different type byte falls through to the "unknown attribute" capture and
 is published to `sensor.<pump>_last_unknown_code`.
 
+### MDP cmd=0x0000 with 187B payload = wedged controller (NOT a firmware variant)
+
+Initially misread as a firmware variant of the standard 0x0100 status
+response. Field observation corrected this:
+
+- The pump emitting cmd=0x0000 (mdp-5000-right) had **both BLE and
+  Wi-Fi non-functional via the official Jebao app** — i.e. the
+  controller had crashed at the application level even though the BLE
+  link still accepted the auth handshake.
+- The 187B payload, when fed through `_parse_mdp_status`, produced
+  `Feed: ON` regardless of the pump's actual state.
+- Power-cycling the pump cleared the symptom and the pump went back to
+  emitting standard `cmd=0x0100 / 211B` responses.
+
+So `cmd=0x0000` is treated as a **wedged-controller stub**, not as valid
+status. The bridge logs a WARNING and the poll-loop's
+`consecutive_polls_without_status` counter ticks toward
+`MDP_CONTROLLER_FAULT_POLLS`, declaring a Controller fault in HA.
+
+If a healthy pump is ever observed emitting cmd=0x0000 (different
+firmware on a working device), this interpretation needs to be revisited.
+
 ### Observed unknown — `0x0c0000=0x28` — RESOLVED
 
 Captured from `dmp-65-right` on 2026-06-11 00:59:55, value 40. Confirmed

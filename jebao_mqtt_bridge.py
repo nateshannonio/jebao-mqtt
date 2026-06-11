@@ -385,12 +385,24 @@ class JebaoPump:
             self._parse_mdp_status(data)
 
         elif cmd == 0x0000:
-            # Some MDP pumps reply to the status read with cmd=0x0000 instead
-            # of 0x0100, with a slightly shorter payload (observed 187B vs
-            # the standard 211B). The device-data layout up to offset 37+
-            # appears identical, so route through the same parser.
-            # mdp-5000-right is the first known pump with this variant.
-            self._parse_mdp_status(data)
+            # cmd=0x0000 has been observed only from a wedged pump controller
+            # (mdp-5000-right: consistently 187B with the device-data byte
+            # implying Feed:ON regardless of actual pump state, and both BLE
+            # and Wi-Fi non-functional via the official app). Treating this as
+            # valid status was masking the real fault.
+            #
+            # DO NOT route through _parse_mdp_status. The poll-loop counter
+            # will naturally tick toward MDP_CONTROLLER_FAULT_POLLS and the
+            # bridge will declare a 'Controller:' fault — surfacing to HA
+            # exactly the signal we want: "this pump needs a power cycle."
+            #
+            # If a healthy pump is ever observed emitting cmd=0x0000 (e.g. a
+            # different firmware uses it legitimately), this branch needs
+            # refinement — for now the conservative read is fault.
+            logger.warning(
+                f"[{self.config.name}] MDP returned stub response (cmd=0x0000, "
+                f"{len(data)}B) — controller likely wedged, may need power cycle"
+            )
 
         elif cmd == 0x0062:
             logger.debug(f"[{self.config.name}] MDP device ready notification")
