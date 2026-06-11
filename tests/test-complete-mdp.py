@@ -87,7 +87,6 @@ async def test_complete_mdp():
     pump_disconnected = False
     
     def handler(sender, data):
-        nonlocal pump_disconnected
         timestamp = time.time()
         print(f"[{timestamp:.3f}] RX: {data.hex()}")
         responses.append((timestamp, data))

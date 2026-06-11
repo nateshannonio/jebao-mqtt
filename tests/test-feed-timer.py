@@ -30,7 +30,8 @@ def test_feed_mode_timer():
             print(f"❌ Failed to connect: {rc}")
     
     def on_message(client, userdata, msg):
-        nonlocal feed_start_time, pump_states
+        # pump_states is a dict — mutated, not reassigned — so no nonlocal needed.
+        nonlocal feed_start_time
         
         topic = msg.topic
         payload = msg.payload.decode('utf-8')
