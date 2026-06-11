@@ -123,6 +123,10 @@ class PumpState:
     # fault layout hasn't been reverse-engineered, so a mechanical fault may arrive
     # as an un-mapped attribute — capture it so we can identify the real fault code.
     last_unknown_code: str = ""
+    # Number of consecutive MDP polls that produced no parseable status response.
+    # Drives the "Controller: ..." fault — distinct from BLE faults so the user
+    # can tell "the pump is wedged, go reboot it" from "BLE is flaky, retry later".
+    consecutive_polls_without_status: int = 0
     
 
 @dataclass 
@@ -570,10 +574,26 @@ class JebaoPump:
             else:
                 logger.info(f"[{self.config.name}] Fault cleared")
 
+        # Reset the "no status response" counter on every successful parse.
+        # This is what clears a Controller: fault once the pump starts replying
+        # again (whether after a restart or after a firmware-level recovery).
+        self.state.consecutive_polls_without_status = 0
+        if self.state.fault and self.state.fault_reason.startswith("Controller:"):
+            self.state.fault = False
+            self.state.fault_reason = ""
+            changed = True
+            logger.info(f"[{self.config.name}] Controller fault cleared (status response resumed)")
+
         if changed or not self.state.state_initialized:
             self.state.state_initialized = True
             self.state_callback(self)
             logger.debug(f"[{self.config.name}] Status: power={power_on} speed={speed}% feed={feed_mode}")
+
+    # If this many MDP poll cycles go by without a parseable status response,
+    # we declare a controller fault. At the default 60s interval this is ~3
+    # minutes of silence — long enough to ride out a transient BLE blip, short
+    # enough to flag a real wedge.
+    MDP_CONTROLLER_FAULT_POLLS = 3
 
     async def _mdp_poll_loop(self):
         """Periodically poll MDP pump status via BLE"""
@@ -584,6 +604,30 @@ class JebaoPump:
                 await self._mdp_request_status()
             except Exception as e:
                 logger.debug(f"[{self.config.name}] Poll error: {e}")
+            # Count this poll as "no status received" until a response actually
+            # arrives — _parse_mdp_status resets the counter on success. If we
+            # cross the threshold without a reset, declare a Controller: fault
+            # so HA dashboards distinguish "pump is wedged, go reboot it" from
+            # "BLE flapping, will recover" (which uses fault_reason 'BLE: ...').
+            self.state.consecutive_polls_without_status += 1
+            if (self.state.consecutive_polls_without_status >= self.MDP_CONTROLLER_FAULT_POLLS
+                    and not (self.state.fault and self.state.fault_reason.startswith("Controller:"))):
+                self.state.fault = True
+                self.state.fault_reason = (
+                    f"Controller: no status response in "
+                    f"{self.state.consecutive_polls_without_status} polls "
+                    f"(likely needs power cycle)"
+                )
+                logger.warning(
+                    f"[{self.config.name}] No MDP status response in "
+                    f"{self.state.consecutive_polls_without_status} polls; "
+                    f"marking as controller fault"
+                )
+                if self.state_callback:
+                    try:
+                        self.state_callback(self)
+                    except Exception as e:
+                        logger.error(f"[{self.config.name}] Error in state callback: {e}")
             await asyncio.sleep(interval)
         logger.debug(f"[{self.config.name}] MDP poll loop ended")
 
