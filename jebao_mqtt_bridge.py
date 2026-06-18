@@ -393,15 +393,23 @@ class JebaoPump:
             #
             # DO NOT route through _parse_mdp_status. The poll-loop counter
             # will naturally tick toward MDP_CONTROLLER_FAULT_POLLS and the
-            # bridge will declare a 'Controller:' fault — surfacing to HA
-            # exactly the signal we want: "this pump needs a power cycle."
+            # bridge will declare a 'Controller:' fault — surfacing to HA the
+            # signal "this pump needs to be reset."
+            #
+            # Recovery note (empirical, MDP-5000): power-cycling the pump does
+            # NOT clear this state. The fix is to hold the WiFi button 5-10s
+            # to enter AP mode, then hold again 5-10s to return to station
+            # mode. That cycle resets the WiFi MCU where the Gizwits stack
+            # runs. Once cleared, the pump returns to cmd=0x0100 / 211B
+            # responses and the fault auto-clears.
             #
             # If a healthy pump is ever observed emitting cmd=0x0000 (e.g. a
             # different firmware uses it legitimately), this branch needs
             # refinement — for now the conservative read is fault.
             logger.warning(
                 f"[{self.config.name}] MDP returned stub response (cmd=0x0000, "
-                f"{len(data)}B) — controller likely wedged, may need power cycle"
+                f"{len(data)}B) — controller likely wedged, "
+                f"toggle WiFi mode to reset (power cycle alone does not work)"
             )
 
         elif cmd == 0x0062:
@@ -624,11 +632,15 @@ class JebaoPump:
             self.state.consecutive_polls_without_status += 1
             if (self.state.consecutive_polls_without_status >= self.MDP_CONTROLLER_FAULT_POLLS
                     and not (self.state.fault and self.state.fault_reason.startswith("Controller:"))):
+                # Recovery for MDP-5000: power cycle does NOT clear this
+                # state. Hold the WiFi button 5-10s into AP mode, then hold
+                # again 5-10s back to station mode. That resets the WiFi
+                # MCU where the Gizwits stack runs.
                 self.state.fault = True
                 self.state.fault_reason = (
                     f"Controller: no status response in "
                     f"{self.state.consecutive_polls_without_status} polls "
-                    f"(likely needs power cycle)"
+                    f"(toggle WiFi mode to reset; power cycle does not work)"
                 )
                 logger.warning(
                     f"[{self.config.name}] No MDP status response in "
