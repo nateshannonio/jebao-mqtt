@@ -22,7 +22,7 @@ A Python service that connects Jebao DMP and MDP series aquarium pumps to Home A
 ## Requirements
 
 - Raspberry Pi Zero W, 3, 4, or 5 (or any Linux device with Bluetooth)
-- Python 3.9+
+- Python 3.11+
 - MQTT Broker (Mosquitto recommended)
 - Home Assistant with MQTT integration
 
