@@ -1,6 +1,6 @@
 # Jebao MQTT Bridge Dependencies
 
-bleak>=3.0.1          # BLE communication
+bleak>=3.0.2          # BLE communication
 paho-mqtt>=2.1.0       # MQTT client
 PyYAML>=6.0.3            # Configuration file parsing
 
