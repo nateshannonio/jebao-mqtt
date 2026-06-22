@@ -5,5 +5,5 @@ paho-mqtt>=2.1.0       # MQTT client
 PyYAML>=6.0.3            # Configuration file parsing
 
 # Test dependencies (install with: pip install -r requirements.txt)
-pytest>=9.0.3
+pytest>=9.1.1
 pytest-asyncio>=1.3.0
